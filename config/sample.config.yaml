@@ -1,0 +1,74 @@
+version: 1
+
+log:
+  level: debug
+  audit_events: db
+
+app:
+  connect:
+    port: 8002
+  metrics_port: 9000
+  identity_proxy_header: X-Frontier-Email
+  resources_config_path: file:///tmp/resources_config
+  cors:
+    allowed_origins:
+      - "http://localhost:3000"
+    allowed_methods:
+      - POST
+      - GET
+      - PUT
+      - PATCH
+      - DELETE
+    allowed_headers:
+      - Authorization
+      - Content-Type
+    exposed_headers:
+      - Content-Type
+  authentication:
+    session:
+      # 32-char hex strings — generated at setup time, do not commit real values
+      hash_secret_key: <HASH_SECRET_KEY>
+      block_secret_key: <BLOCK_SECRET_KEY>
+      domain: ""
+      same_site: "lax"
+      secure: false
+      validity: "720h"
+    token:
+      rsa_path: ""
+      rsa_base64: ""
+      iss: "http://localhost.frontier"
+      validity: "1h"
+    callback_urls:
+      - "http://localhost:8002/raystack.frontier.v1beta1.FrontierService/AuthCallback"
+    mail_otp:
+      subject: "Frontier - Login Link"
+      body: "Please copy/paste the OneTimePassword in login form.<h2>{{.Otp}}</h2>This code will expire in 15 minutes."
+      validity: 15m
+    test_users:
+      enabled: true
+      domain: raystack.org
+      otp: "<TEST_OTP>"
+  admin:
+    users:
+      - "admin1+sa@raystack.org"
+      - "admin2+sa@raystack.org"
+  mailer:
+    smtp_host: smtp.example.com
+    smtp_port: 587
+    smtp_username: "username"
+    smtp_password: "password"
+    smtp_insecure: true
+    headers:
+      from: "username@acme.org"
+
+db:
+  driver: postgres
+  url: postgres://<PG_USER>:<PG_PASSWORD>@<PG_HOST>:<PG_PORT>/<FRONTIER_DB>?sslmode=disable
+  max_query_timeout: 50000ms
+
+spicedb:
+  host: localhost
+  pre_shared_key: frontier
+  port: <SPICEDB_PORT>
+  check_trace: false
+  consistency: "full"
