@@ -11,7 +11,7 @@ Optionally includes full local setup of Frontier with all dependencies (PostgreS
 - **Cookie Store**: `~/frontier-test/.cookies.json`
 - **Config Store**: `~/frontier-test/.config.json`
 - **Generated Frontier Config**: `~/frontier-test/config.yaml`
-- **Sample Config Template**: `config/sample.config.yaml` (in this repo)
+- **Sample Config Template**: `plugins/frontier-sandbox/config/sample.config.yaml` (in this repo)
 
 ---
 
@@ -156,7 +156,7 @@ Wait a few seconds and verify SpiceDB is healthy before proceeding (check that t
 
 ### Step 5: Generate Frontier config.yaml
 
-Copy the **sample config template** from `config/sample.config.yaml` in this repo to `~/frontier-test/config.yaml`.
+Copy the **sample config template** from `plugins/frontier-sandbox/config/sample.config.yaml` in this repo to `~/frontier-test/config.yaml`.
 
 Replace the placeholders with actual values:
 - `<HASH_SECRET_KEY>` — generate a random 32-char hex string: `openssl rand -hex 16`

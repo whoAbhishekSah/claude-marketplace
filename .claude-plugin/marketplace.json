@@ -1,0 +1,21 @@
+{
+  "name": "claude-marketplace",
+  "owner": {
+    "name": "Abhishek Sah",
+    "email": "abhi.sah.97@gmail.com"
+  },
+  "metadata": {
+    "description": "Claude Code plugins for Raystack services"
+  },
+  "plugins": [
+    {
+      "name": "frontier-sandbox",
+      "source": "./plugins/frontier-sandbox",
+      "description": "Setup and test Frontier RPCs locally with automatic authentication, database provisioning, and SpiceDB integration",
+      "version": "1.0.0",
+      "author": {
+        "name": "Abhishek Sah"
+      }
+    }
+  ]
+}

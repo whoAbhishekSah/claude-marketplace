@@ -1,0 +1,13 @@
+{
+  "name": "frontier-sandbox",
+  "description": "Setup and test Frontier RPCs locally with automatic authentication, database provisioning, and SpiceDB integration",
+  "version": "1.0.0",
+  "author": {
+    "name": "Abhishek Sah",
+    "email": "abhi.sah.97@gmail.com"
+  },
+  "homepage": "https://github.com/whoAbhishekSah/claude-marketplace",
+  "repository": "https://github.com/whoAbhishekSah/claude-marketplace",
+  "license": "MIT",
+  "keywords": ["frontier", "raystack", "spicedb", "connectrpc", "testing"]
+}
