@@ -1,7 +1,7 @@
 # Frontier Local Testing
 
 Test Frontier RPCs locally using ConnectRPC protocol with automatic authentication.
-Optionally includes full local setup of Frontier with all dependencies (PostgreSQL, SpiceDB).
+Optionally includes full setup of Frontier with all dependencies. Dependencies (PostgreSQL + SpiceDB) run in **Docker by default** via a provided compose file; a fully-local install is offered as an alternative. Frontier itself is always built from source.
 
 ## Configuration
 
@@ -12,6 +12,7 @@ Optionally includes full local setup of Frontier with all dependencies (PostgreS
 - **Config Store**: `~/frontier-test/.config.json`
 - **Generated Frontier Config**: `~/frontier-test/config.yaml`
 - **Sample Config Template**: `plugins/frontier-sandbox/config/sample.config.yaml` (in this repo)
+- **Docker Compose File**: `plugins/frontier-sandbox/config/docker-compose.yaml` (in this repo — runs one PG container holding both `frontier` and `frontier_spicedb` DBs, plus a SpiceDB container)
 
 ---
 
@@ -21,22 +22,33 @@ On startup, do NOT print cookies or check env vars.
 
 ### Auto-detect Existing Setup
 
-First, check if `~/frontier-test/.config.json` exists and contains `frontier_pid` / `spicedb_pid`. If it does, check whether those processes are still alive (using the [Stale PID Detection](#stale-pid-detection) rule).
+First, check if `~/frontier-test/.config.json` exists. Read `setup_mode` from it (`"docker"` or `"local"`) and check whether the dependencies and Frontier are still up:
 
-- **Both alive** → greet the user and go straight to [Usage](#usage). Print: `Frontier is running (PID <pid>, port <port>). What would you like to test?`
-- **Partially alive** (e.g., SpiceDB running but Frontier dead) → tell the user which service is down and offer to restart just that one
-- **Both dead** → clean up stale PIDs from `.config.json`, then proceed to the normal startup flow below
-- **No setup keys in config** → proceed to the normal startup flow below
+**Common to both modes** — check if `frontier_pid` is alive using [Stale PID Detection](#stale-pid-detection).
+
+**If `setup_mode == "docker"`:** check if the dependency containers are running:
+```bash
+docker ps --filter name=frontier-postgres --filter status=running --format '{{.Names}}'
+docker ps --filter name=frontier-spicedb  --filter status=running --format '{{.Names}}'
+```
+
+**If `setup_mode == "local"`:** check `spicedb_pid` using [Stale PID Detection](#stale-pid-detection).
+
+Decision:
+- **All alive** (deps + Frontier) → greet the user and go straight to [Usage](#usage). Print: `Frontier is running (PID <pid>, port <port>, setup_mode=<mode>). What would you like to test?`
+- **Deps alive, Frontier dead** → tell the user dependencies are up and offer to just rebuild/start Frontier
+- **Deps dead, Frontier dead** → clean up stale PIDs from `.config.json`, proceed to normal startup flow
+- **No setup keys in config** → proceed to normal startup flow
 
 ### Normal Startup Flow
 
 **Ask the user one question:**
 
 > Would you like to:
-> 1. **Setup Frontier locally** — install dependencies, create databases, build and start the server
+> 1. **Setup Frontier** — start dependencies (PostgreSQL + SpiceDB), build Frontier from source, run migrations, start the server
 > 2. **Skip to testing** — I already have Frontier running, just help me test RPCs
 
-- If the user picks **1**, go to [Local Environment Setup](#local-environment-setup)
+- If the user picks **1**, go to [Environment Setup](#environment-setup)
 - If the user picks **2**, go to [First-time Config](#first-time-config) (just collect server address and OTP), then proceed to [Usage](#usage)
 
 ### Shorthand Commands
@@ -78,23 +90,55 @@ On subsequent runs, silently load the config. If the user wants to change settin
 
 ---
 
-## Local Environment Setup
+## Environment Setup
 
-When the user chooses to setup Frontier locally, follow these steps. This sets up PostgreSQL databases, SpiceDB, builds Frontier, and starts it.
+When the user chooses to setup Frontier, first pick a **setup mode**. In both modes, Frontier itself is built from source (so you can iterate on code). Only the dependencies differ:
 
-First collect the [First-time Config](#first-time-config) values, plus these additional details:
+> Which setup mode would you like?
+> 1. **Docker** *(default, recommended)* — runs PostgreSQL and SpiceDB in containers via a provided docker-compose file. No local install of PG/SpiceDB needed. Choose this unless you have a reason not to.
+> 2. **Local** — installs PostgreSQL 15 and SpiceDB v1.34.0 locally (into `~/frontier-test/bin/`, without touching your global setup) and runs them as background processes.
 
+Save the choice under `setup_mode` in `.config.json`. If the user just hits enter or says "default", pick `"docker"`.
+
+Then collect the [First-time Config](#first-time-config) values. The additional PG credential questions differ by mode:
+
+**Docker mode** — no PG credential questions. The compose file pins these:
+- `pg_user = "frontier"`, `pg_password = "frontier"`, `pg_host = "localhost"`, `pg_port = "5432"`
+- `frontier_db = "frontier"`, `spicedb_db = "frontier_spicedb"` (fixed — the container gives isolation, so no random suffix is needed)
+- `spicedb_port = 50052`
+
+Just check for port conflicts on the host before starting (see [Port Conflict Detection](#port-conflict-detection)). If `5432` or `50052` is taken, ask the user for alternate host ports and pass them via env vars to docker compose (`PG_PORT=... SPICEDB_GRPC_PORT=...`). Save the chosen values in `.config.json`.
+
+**Local mode** — ask these:
 3. **PostgreSQL user** (default: current OS username from `whoami`)
 4. **PostgreSQL password** (default: empty — for local trust auth)
 5. **PostgreSQL host** (default: `localhost`)
 6. **PostgreSQL port** (default: `5432`)
 
-Update `.config.json` with the full set:
+Update `.config.json` with the full set. Example for docker mode:
 ```json
 {
   "server": "localhost:8002",
   "test_domain": "raystack.org",
   "test_otp": "hemlo",
+  "setup_mode": "docker",
+  "pg_user": "frontier",
+  "pg_password": "frontier",
+  "pg_host": "localhost",
+  "pg_port": "5432",
+  "frontier_db": "frontier",
+  "spicedb_db": "frontier_spicedb",
+  "spicedb_port": 50052
+}
+```
+
+Example for local mode:
+```json
+{
+  "server": "localhost:8002",
+  "test_domain": "raystack.org",
+  "test_otp": "hemlo",
+  "setup_mode": "local",
   "pg_user": "abhishek",
   "pg_password": "",
   "pg_host": "localhost",
@@ -178,9 +222,72 @@ Apply this after every file creation or write. This prevents other users on the 
 
 #### Database Name Verification Before Drop
 Before dropping any database during teardown:
-1. Verify the database name matches the pattern `frontier_<suffix>` or `frontier_spicedb_<suffix>` where `<suffix>` matches the `db_suffix` stored in `.config.json`
+1. Verify the database name matches the pattern `frontier_<suffix>` or `frontier_spicedb_<suffix>` where `<suffix>` matches the `db_suffix` stored in `.config.json`, **or** matches the fixed docker names (`frontier`, `frontier_spicedb`) when `setup_mode == "docker"`
 2. Verify the database actually exists: `psql ... -c "SELECT 1 FROM pg_database WHERE datname = '<db_name>'" 2>/dev/null`
-3. If the name doesn't match the expected pattern or the suffix doesn't match `.config.json`, refuse to drop and warn the user
+3. If the name doesn't match the expected pattern, refuse to drop and warn the user
+
+---
+
+## Docker Setup Path
+
+Use this path when `setup_mode == "docker"` (the default). It collapses local steps 1–4 (install PG, create DBs, migrate SpiceDB, start SpiceDB) into a single `docker compose up`, because the compose file ships everything needed.
+
+### Docker Prerequisites
+
+**Check**: `docker --version` and `docker compose version` (or `docker-compose --version`). Also run `docker info` to confirm the Docker daemon is actually reachable.
+
+- If Docker isn't installed or the daemon isn't running, **stop and tell the user**. Do NOT try to `brew install docker` silently — Docker Desktop / Colima / OrbStack is a user-level install choice. Offer:
+  - Retry after they start Docker Desktop
+  - Fall back to [Local Setup Path](#prerequisites-check) (rerun setup with `setup_mode = "local"`)
+- **Go >= 1.24.0** is still required to build Frontier from source. Use the same check/install logic as [Go >= 1.24.0](#3-go--1240) below.
+
+Docker mode does NOT need local `psql`/`createdb`/`dropdb`/`spicedb` binaries. All DB work happens through the postgres container via `docker exec` or short-lived `psql` invocations inside the container.
+
+### Docker Step 1: Start dependencies
+
+The compose file is at `plugins/frontier-sandbox/config/docker-compose.yaml`. Locate the repo root — if the plugin was installed through `/plugin install`, the path looks like `~/.claude/plugins/<marketplace>/frontier-sandbox/config/docker-compose.yaml`. Store the resolved path in `.config.json` as `compose_file`.
+
+Start the stack:
+```bash
+docker compose -f <compose_file> -p frontier-sandbox up -d
+```
+
+If the user picked non-default ports, pass them as env vars:
+```bash
+PG_PORT=<pg_port> SPICEDB_GRPC_PORT=<spicedb_port> \
+  docker compose -f <compose_file> -p frontier-sandbox up -d
+```
+
+**Wait for readiness** (apply [Health Check Timeout](#health-check-timeout) — 30s cap, show logs on failure):
+- Postgres: `docker exec frontier-postgres pg_isready -U frontier -d frontier` returns 0
+- SpiceDB migrate container has exited successfully: `docker inspect -f '{{.State.ExitCode}}' frontier-spicedb-migrate` returns `0`
+- SpiceDB serve container is running: `docker inspect -f '{{.State.Running}}' frontier-spicedb` returns `true`, and the gRPC port is listening on the host
+
+The compose file creates both databases automatically:
+- `frontier` — via `POSTGRES_DB` env var
+- `frontier_spicedb` — via the `init-db.sql` script mounted into `/docker-entrypoint-initdb.d/`
+
+If migration logs show errors, fetch them with `docker logs frontier-spicedb-migrate` and surface to the user.
+
+### Docker Step 2: Verify DB connectivity from host
+
+Confirm that the host can reach the containerized PG on the published port:
+```bash
+psql "postgres://frontier:frontier@localhost:<pg_port>/frontier?sslmode=disable" -c "SELECT 1;"
+```
+
+If `psql` isn't on the host, run the check *inside* the container instead:
+```bash
+docker exec frontier-postgres psql -U frontier -d frontier -c "SELECT 1;"
+```
+
+After this succeeds, jump to [Step 5: Generate Frontier config.yaml](#step-5-generate-frontier-configyaml) and continue with Steps 5–8 (they're identical for both modes).
+
+---
+
+## Local Setup Path
+
+Use this path when `setup_mode == "local"`. Follow Prerequisites Check → Steps 1–8.
 
 ### Prerequisites Check
 
@@ -305,10 +412,12 @@ Before running each step, check if it was already completed in a previous run. T
 
 | Step | How to detect already done |
 |------|---------------------------|
-| Step 1 (DB connectivity) | Always re-check — it's fast |
-| Step 2 (Create databases) | Check if `frontier_db` and `spicedb_db` from `.config.json` exist: `psql ... -c "SELECT 1 FROM pg_database WHERE datname='<db>'"` |
-| Step 3 (SpiceDB migrate) | Check if SpiceDB tables exist in the database: `psql <spicedb_db> -c "SELECT 1 FROM information_schema.tables WHERE table_name='relation_tuple'" 2>/dev/null` |
-| Step 4 (SpiceDB running) | Check if `spicedb_pid` is alive or if the SpiceDB port is listening |
+| Docker Step 1 (containers up) | `docker ps --filter name=frontier-postgres --filter status=running -q` is non-empty AND same for `frontier-spicedb`. If containers exist but are stopped, `docker compose ... start` instead of recreating |
+| Docker Step 2 (DB connectivity) | Always re-check — it's fast |
+| Local Step 1 (DB connectivity) | Always re-check — it's fast |
+| Local Step 2 (Create databases) | Check if `frontier_db` and `spicedb_db` from `.config.json` exist: `psql ... -c "SELECT 1 FROM pg_database WHERE datname='<db>'"` |
+| Local Step 3 (SpiceDB migrate) | Check if SpiceDB tables exist in the database: `psql <spicedb_db> -c "SELECT 1 FROM information_schema.tables WHERE table_name='relation_tuple'" 2>/dev/null` |
+| Local Step 4 (SpiceDB running) | Check if `spicedb_pid` is alive or if the SpiceDB port is listening |
 | Step 5 (Config generated) | Check if `~/frontier-test/config.yaml` exists |
 | Step 6 (Frontier built) | Check if `~/frontier-test/frontier` binary exists AND `source_git_hash` in `.config.json` matches current `git rev-parse HEAD` in `~/raystack/frontier` |
 | Step 7 (Frontier migrate) | Check if Frontier tables exist: `psql <frontier_db> -c "SELECT 1 FROM information_schema.tables WHERE table_name='users'" 2>/dev/null` |
@@ -400,6 +509,12 @@ Run this as a background process. Store the PID in `.config.json` under `"spiced
 
 Wait a few seconds and verify SpiceDB is healthy before proceeding (check that the gRPC port is listening).
 
+---
+
+## Shared Steps (Both Modes)
+
+Steps 5–8 are identical for docker and local setups — they build and run Frontier from source against whatever dependencies were started.
+
 ### Step 5: Generate Frontier config.yaml
 
 Copy the **sample config template** from `plugins/frontier-sandbox/config/sample.config.yaml` in this repo to `~/frontier-test/config.yaml`.
@@ -408,12 +523,12 @@ Replace the placeholders with actual values:
 - `<HASH_SECRET_KEY>` — generate a random 32-char hex string: `openssl rand -hex 16`
 - `<BLOCK_SECRET_KEY>` — generate a different random 32-char hex string: `openssl rand -hex 16`
 - `<TEST_OTP>` — from `.config.json`
-- `<PG_USER>` — from `.config.json`
-- `<PG_PASSWORD>` — from `.config.json` (empty string if none)
-- `<PG_HOST>` — from `.config.json`
+- `<PG_USER>` — from `.config.json` (`"frontier"` in docker mode)
+- `<PG_PASSWORD>` — from `.config.json` (`"frontier"` in docker mode; empty string for local trust auth)
+- `<PG_HOST>` — from `.config.json` (`"localhost"` — docker publishes the container port to the host)
 - `<PG_PORT>` — from `.config.json`
-- `<FRONTIER_DB>` — e.g., `frontier_a3f1`
-- `<SPICEDB_PORT>` — `50052`
+- `<FRONTIER_DB>` — e.g., `frontier_a3f1` (local) or `frontier` (docker)
+- `<SPICEDB_PORT>` — from `.config.json`
 
 Do NOT hardcode the secret keys. Generate fresh ones each setup.
 
@@ -468,13 +583,14 @@ If it returns a response (even an auth error), the server is running.
 
 ### Setup Complete — Quick Reference
 
-After all steps succeed, print this summary:
+After all steps succeed, print this summary. The SpiceDB line reads "(docker)" or "(PID ...)" depending on mode:
 
 ```
-Frontier is ready!
+Frontier is ready!  [setup_mode: <docker|local>]
 
-  Frontier:  http://localhost:<port> (PID <pid>)
-  SpiceDB:   localhost:<spicedb_port> (PID <pid>)
+  Frontier:    http://localhost:<port> (PID <pid>)
+  SpiceDB:     localhost:<spicedb_port> <(docker) | (PID <pid>)>
+  Postgres:    localhost:<pg_port> <(docker) | (local)>
   Frontier DB: <frontier_db>
   SpiceDB DB:  <spicedb_db>
 
@@ -491,31 +607,46 @@ Things to try:
 
 ### Teardown
 
-When the user asks to **stop**, **teardown**, or **cleanup** the local environment:
+When the user asks to **stop**, **teardown**, or **cleanup** the environment, branch on `setup_mode` in `.config.json`:
 
-1. Kill Frontier process (using stored `frontier_pid`)
-2. Kill SpiceDB process (using stored `spicedb_pid`)
-3. If a local PostgreSQL was started (`pg_data_dir` exists in `.config.json`), stop it:
+**Common first step (both modes):** Kill the Frontier process using stored `frontier_pid` (apply [Graceful Shutdown](#graceful-shutdown) and [Stale PID Detection](#stale-pid-detection)).
+
+**If `setup_mode == "docker"`:**
+1. Ask the user whether to **keep** or **drop** data (the persistent named volume):
+   - **Stop only** — containers down, volume kept: `docker compose -f <compose_file> -p frontier-sandbox down`
+   - **Full cleanup** — drops the volume (both databases go with it): `docker compose -f <compose_file> -p frontier-sandbox down -v`
+2. Remove `frontier_pid` and setup container keys from `.config.json` (keep `setup_mode` so the next run remembers the choice, unless the user asks to reconfigure).
+
+**If `setup_mode == "local"`:**
+1. Kill SpiceDB process (using stored `spicedb_pid`)
+2. If a local PostgreSQL was started (`pg_data_dir` exists in `.config.json`), stop it:
    ```bash
    <bin_pg_ctl> -D ~/frontier-test/pgdata stop
    ```
-4. Optionally drop the databases (use resolved `bin_dropdb` path):
+3. Optionally drop the databases (use resolved `bin_dropdb` path, apply [Database Name Verification Before Drop](#database-name-verification-before-drop)):
    ```bash
    <bin_dropdb> -U <PG_USER> -h <PG_HOST> -p <PG_PORT> "frontier_<SUFFIX>"
    <bin_dropdb> -U <PG_USER> -h <PG_HOST> -p <PG_PORT> "frontier_spicedb_<SUFFIX>"
    ```
-5. Clean up `.config.json` by removing the setup-related keys
+4. Clean up `.config.json` by removing the setup-related keys
 
-Always confirm with the user before dropping databases.
+Always confirm with the user before dropping data or databases.
 
 ### Status Check
 
-When the user asks for **status** of the local environment:
+When the user asks for **status**, branch on `setup_mode`:
 
-1. Check if SpiceDB process is running (using stored PID)
-2. Check if Frontier process is running (using stored PID)
-3. Check if PostgreSQL is accepting connections
-4. Report the database names, ports, and PIDs
+**Both modes:** Check if the Frontier process is running (stored `frontier_pid`), and whether the Frontier HTTP port responds to a quick `curl`.
+
+**If `setup_mode == "docker"`:**
+- `docker ps --filter label=com.docker.compose.project=frontier-sandbox --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'`
+- Verify Postgres is accepting connections: `docker exec frontier-postgres pg_isready -U frontier -d frontier`
+
+**If `setup_mode == "local"`:**
+- Check if SpiceDB process is running (using stored PID)
+- Check if PostgreSQL is accepting connections via `psql ... -c "SELECT 1"`
+
+Report database names, ports, PIDs, and (for docker) container health.
 
 ### Rebuild & Restart
 

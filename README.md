@@ -9,7 +9,8 @@ Claude Code plugins for Raystack services.
 A Claude Code skill to setup and test [Frontier](https://github.com/raystack/frontier) RPCs locally. It can:
 
 - **Setup Frontier from scratch** — provision PostgreSQL databases, start SpiceDB, build Frontier from source, run migrations, and start the server
-- **Auto-install dependencies** — if PostgreSQL 15, SpiceDB v1.34.0, or Go 1.24+ aren't found, installs them locally without touching your global setup
+- **Choose Docker or local deps** — defaults to Docker (one PG container with both the `frontier` and `frontier_spicedb` databases + a SpiceDB container, via a provided compose file). Fall back to fully-local install if you prefer
+- **Auto-install dependencies** (local mode) — if PostgreSQL 15, SpiceDB v1.34.0, or Go 1.24+ aren't found, installs them locally without touching your global setup
 - **Test RPCs** — make ConnectRPC calls with automatic authentication via mail OTP flow
 - **Manage sessions** — cookie persistence, auto-login, super admin support
 - **Rebuild & restart** — rebuild Frontier after code changes without recreating databases (skips rebuild if source unchanged)
@@ -31,7 +32,12 @@ A Claude Code skill to setup and test [Frontier](https://github.com/raystack/fro
 /plugin install frontier-sandbox@claude-marketplace
 ```
 
-No need to pre-install dependencies. The skill checks for PostgreSQL 15, SpiceDB v1.34.0, and Go 1.24+ on startup. If any are missing or the wrong version, it installs them **locally** into `~/frontier-test/bin/` without affecting your existing setup.
+No need to pre-install dependencies. On startup the skill asks how to provision dependencies:
+
+- **Docker** *(default)* — brings up PostgreSQL + SpiceDB with the compose file at `plugins/frontier-sandbox/config/docker-compose.yaml`. Both databases live in one PG container (created via an init script). You only need Docker and Go 1.24+ installed on the host.
+- **Local** — installs PostgreSQL 15 and SpiceDB v1.34.0 into `~/frontier-test/bin/` (no impact on your global setup) and runs them as background processes.
+
+Frontier itself is always built from source so you can iterate on code and use `rebuild` to restart.
 
 ## Usage
 
@@ -42,8 +48,8 @@ Run the skill in Claude Code:
 ```
 
 On startup it will:
-1. **Auto-detect** if Frontier is already running from a previous session and reuse it
-2. Otherwise, ask whether to **setup locally** or **skip to testing** (if you have Frontier running elsewhere)
+1. **Auto-detect** if Frontier and its dependencies (docker containers or local processes) are already running from a previous session and reuse them
+2. Otherwise, ask whether to **setup Frontier** (and if so, docker or local mode — docker is the default) or **skip to testing** (if you have Frontier running elsewhere)
 
 ### Shorthand Commands
 
@@ -105,6 +111,8 @@ plugins/
       plugin.json                  # Plugin manifest
     config/
       sample.config.yaml           # Frontier config template (no secrets)
+      docker-compose.yaml          # PostgreSQL + SpiceDB dependencies (default setup)
+      init-db.sql                  # Creates the second DB (frontier_spicedb) on first PG boot
     skills/
       frontier-sandbox/
         SKILL.md                   # Skill definition
