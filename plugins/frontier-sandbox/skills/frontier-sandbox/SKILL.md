@@ -19,7 +19,18 @@ Optionally includes full local setup of Frontier with all dependencies (PostgreS
 
 On startup, do NOT print cookies or check env vars.
 
-**Ask the user one question first:**
+### Auto-detect Existing Setup
+
+First, check if `~/frontier-test/.config.json` exists and contains `frontier_pid` / `spicedb_pid`. If it does, check whether those processes are still alive (using the [Stale PID Detection](#stale-pid-detection) rule).
+
+- **Both alive** → greet the user and go straight to [Usage](#usage). Print: `Frontier is running (PID <pid>, port <port>). What would you like to test?`
+- **Partially alive** (e.g., SpiceDB running but Frontier dead) → tell the user which service is down and offer to restart just that one
+- **Both dead** → clean up stale PIDs from `.config.json`, then proceed to the normal startup flow below
+- **No setup keys in config** → proceed to the normal startup flow below
+
+### Normal Startup Flow
+
+**Ask the user one question:**
 
 > Would you like to:
 > 1. **Setup Frontier locally** — install dependencies, create databases, build and start the server
@@ -27,6 +38,20 @@ On startup, do NOT print cookies or check env vars.
 
 - If the user picks **1**, go to [Local Environment Setup](#local-environment-setup)
 - If the user picks **2**, go to [First-time Config](#first-time-config) (just collect server address and OTP), then proceed to [Usage](#usage)
+
+### Shorthand Commands
+
+At any point during the conversation, recognize these as quick actions — do NOT re-run the startup flow:
+
+| Shorthand | Action |
+|-----------|--------|
+| **rebuild** / **restart** | [Rebuild & Restart](#rebuild--restart) |
+| **logs** / **debug** | [Log Tailing](#log-tailing) |
+| **seed** / **populate** | [Seed Data](#seed-data) |
+| **status** | [Status Check](#status-check) |
+| **teardown** / **stop** / **cleanup** | [Teardown](#teardown) |
+| **list rpcs** / **show rpcs** | [Finding Available RPCs](#finding-available-rpcs) |
+| **reconfigure** | Re-run [First-time Config](#first-time-config) |
 
 ---
 
@@ -139,6 +164,17 @@ When waiting for a service to become healthy (SpiceDB in Step 4, Frontier in Ste
    - Ask if they want to retry, check logs, or abort (which triggers rollback)
 
 Do NOT wait indefinitely or retry in a silent loop.
+
+#### File Permissions
+When creating or writing files that contain secrets, set permissions to owner-only:
+```bash
+chmod 600 ~/frontier-test/.cookies.json
+chmod 600 ~/frontier-test/.config.json
+chmod 600 ~/frontier-test/config.yaml
+chmod 600 ~/frontier-test/frontier.log
+chmod 600 ~/frontier-test/spicedb.log
+```
+Apply this after every file creation or write. This prevents other users on the machine from reading session tokens, passwords, or hash keys.
 
 #### Database Name Verification Before Drop
 Before dropping any database during teardown:
@@ -263,6 +299,39 @@ If any port is occupied:
    - **Use alternate ports** — pick free ports and update the config accordingly. If using alternate ports, update `spicedb_port` in `.config.json` and the `app.connect.port` / `spicedb.port` / `app.metrics_port` in the generated config.yaml
 3. Do NOT silently fail or overwrite a running service
 
+### Resume After Failure
+
+Before running each step, check if it was already completed in a previous run. This lets users resume without redoing everything:
+
+| Step | How to detect already done |
+|------|---------------------------|
+| Step 1 (DB connectivity) | Always re-check — it's fast |
+| Step 2 (Create databases) | Check if `frontier_db` and `spicedb_db` from `.config.json` exist: `psql ... -c "SELECT 1 FROM pg_database WHERE datname='<db>'"` |
+| Step 3 (SpiceDB migrate) | Check if SpiceDB tables exist in the database: `psql <spicedb_db> -c "SELECT 1 FROM information_schema.tables WHERE table_name='relation_tuple'" 2>/dev/null` |
+| Step 4 (SpiceDB running) | Check if `spicedb_pid` is alive or if the SpiceDB port is listening |
+| Step 5 (Config generated) | Check if `~/frontier-test/config.yaml` exists |
+| Step 6 (Frontier built) | Check if `~/frontier-test/frontier` binary exists AND `source_git_hash` in `.config.json` matches current `git rev-parse HEAD` in `~/raystack/frontier` |
+| Step 7 (Frontier migrate) | Check if Frontier tables exist: `psql <frontier_db> -c "SELECT 1 FROM information_schema.tables WHERE table_name='users'" 2>/dev/null` |
+| Step 8 (Frontier running) | Check if `frontier_pid` is alive or if the Frontier port is listening |
+
+If a step is already done, print `Step N: <description> — already done, skipping` and move on.
+
+### Progress Messages
+
+For steps that take noticeable time, print a message BEFORE starting so the user knows what's happening:
+
+| Step | Message |
+|------|---------|
+| Step 2 | `Creating databases frontier_<suffix> and frontier_spicedb_<suffix>...` |
+| Step 3 | `Running SpiceDB migrations...` |
+| Step 4 | `Starting SpiceDB on port <port>...` |
+| Step 5 | `Generating Frontier config...` |
+| Step 6 | `Building Frontier from source... this may take a few minutes on first run` |
+| Step 7 | `Running Frontier database migrations...` |
+| Step 8 | `Starting Frontier on port <port>...` |
+
+After each step succeeds, print a short confirmation: `Done.` or `SpiceDB is healthy.` etc.
+
 ### Step 1: Verify PostgreSQL Connectivity
 
 Before creating databases or running migrations, verify that the configured PostgreSQL credentials actually work:
@@ -355,10 +424,18 @@ If Frontier source is not already present at `~/raystack/frontier`, clone it:
 git clone https://github.com/raystack/frontier ~/raystack/frontier
 ```
 
-Build:
+**Build cache**: Before building, check if a rebuild is actually needed:
+```bash
+CURRENT_HASH=$(cd ~/raystack/frontier && git rev-parse HEAD)
+STORED_HASH=$(cat .config.json | grep source_git_hash | ... )  # read from .config.json
+```
+- If `source_git_hash` in `.config.json` matches `CURRENT_HASH` AND `~/frontier-test/frontier` binary exists, skip the build: `Build skipped — source unchanged (commit <short_hash>)`
+- Otherwise, build and store the new hash:
+
 ```bash
 cd ~/raystack/frontier && CGO_ENABLED=0 go build -o ~/frontier-test/frontier .
 ```
+After a successful build, update `.config.json` with `"source_git_hash": "<CURRENT_HASH>"`.
 
 ### Step 7: Migrate Frontier Database
 
@@ -383,6 +460,29 @@ curl -s http://localhost:8002/raystack.frontier.v1beta1.FrontierService/ListUser
 ```
 
 If it returns a response (even an auth error), the server is running.
+
+### Setup Complete — Quick Reference
+
+After all steps succeed, print this summary:
+
+```
+Frontier is ready!
+
+  Frontier:  http://localhost:<port> (PID <pid>)
+  SpiceDB:   localhost:<spicedb_port> (PID <pid>)
+  Frontier DB: <frontier_db>
+  SpiceDB DB:  <spicedb_db>
+
+Things to try:
+  "list all users as admin"
+  "create an org called my-org"
+  "seed" — create sample orgs, users, and projects
+  "show me available RPCs"
+  "logs" — view server logs
+  "status" — check what's running
+  "rebuild" — rebuild after code changes
+  "teardown" — stop everything
+```
 
 ### Teardown
 
