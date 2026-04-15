@@ -79,12 +79,103 @@ Update `.config.json` with the full set:
 
 ### Prerequisites Check
 
-Verify these are available on the system before proceeding:
-- **PostgreSQL** (check: `pg_isready` and `psql --version`) — must be running locally
-- **SpiceDB CLI** v1.34.0 (check: `which spicedb && spicedb version`)
-- **Go** >= 1.24.0 (check: `go version`)
+Local binary directory: `~/frontier-test/bin/` (create if missing).
 
-If any prerequisite is missing, tell the user what to install and stop.
+Check each dependency in order. If the right version is already on the system, use it. If not, install it **locally** into `~/frontier-test/bin/` — never touch the global installation. Tell the user what was installed and where.
+
+Store the resolved binary paths in `.config.json` so all subsequent commands use the correct versions:
+```json
+{
+  "bin_psql": "/opt/homebrew/opt/postgresql@15/bin/psql",
+  "bin_createdb": "/opt/homebrew/opt/postgresql@15/bin/createdb",
+  "bin_dropdb": "/opt/homebrew/opt/postgresql@15/bin/dropdb",
+  "bin_spicedb": "~/frontier-test/bin/spicedb",
+  "bin_go": "~/frontier-test/bin/go1.24.0",
+  "pg_data_dir": "~/frontier-test/pgdata"
+}
+```
+
+All commands in this skill (createdb, dropdb, psql, spicedb, go build, etc.) MUST use the resolved binary path from `.config.json`, never bare command names.
+
+#### 1. PostgreSQL 15
+
+**Check**: `psql --version` — look for `15.x`.
+
+If PostgreSQL 15 is already running locally and accessible, use it. Store the path to `psql`/`createdb`/`dropdb` in `.config.json`.
+
+**If not found or wrong version**, install locally:
+```bash
+brew install postgresql@15
+```
+This installs without linking, so it won't conflict with any existing PostgreSQL. Binaries are at `/opt/homebrew/opt/postgresql@15/bin/` (Apple Silicon) or `/usr/local/opt/postgresql@15/bin/` (Intel).
+
+If no PostgreSQL server is running on the expected port, start a **local instance** with its own data directory:
+```bash
+mkdir -p ~/frontier-test/pgdata
+/opt/homebrew/opt/postgresql@15/bin/initdb -D ~/frontier-test/pgdata
+/opt/homebrew/opt/postgresql@15/bin/pg_ctl -D ~/frontier-test/pgdata -l ~/frontier-test/pg.log -o "-p <PG_PORT>" start
+```
+Store the data dir in `.config.json` under `"pg_data_dir"` so teardown can stop it.
+
+Tell the user: `Installed PostgreSQL 15 locally. Binaries at /opt/homebrew/opt/postgresql@15/bin/, data at ~/frontier-test/pgdata`
+
+#### 2. SpiceDB v1.34.0
+
+**Check**: `spicedb version` — look for exactly `v1.34.0`.
+
+If found, use it. Store path in `.config.json`.
+
+**If not found or wrong version**, download the specific release:
+```bash
+mkdir -p ~/frontier-test/bin
+# macOS ARM
+curl -L -o ~/frontier-test/bin/spicedb.tar.gz \
+  "https://github.com/authzed/spicedb/releases/download/v1.34.0/spicedb_1.34.0_darwin_arm64.tar.gz"
+# macOS Intel — use darwin_amd64 instead
+
+tar -xzf ~/frontier-test/bin/spicedb.tar.gz -C ~/frontier-test/bin/ spicedb
+rm ~/frontier-test/bin/spicedb.tar.gz
+chmod +x ~/frontier-test/bin/spicedb
+```
+
+Detect architecture with `uname -m` (`arm64` = Apple Silicon, `x86_64` = Intel).
+
+Tell the user: `Installed SpiceDB v1.34.0 locally at ~/frontier-test/bin/spicedb`
+
+#### 3. Go >= 1.24.0
+
+**Check**: `go version` — look for `1.24.0` or higher.
+
+If found, use it. Store path in `.config.json`.
+
+**If not found or wrong version**, install using Go's version manager:
+```bash
+# Use existing go (any version) to download the right one
+go install golang.org/dl/go1.24.0@latest
+go1.24.0 download
+# The binary is at ~/go/bin/go1.24.0
+ln -sf ~/go/bin/go1.24.0 ~/frontier-test/bin/go1.24.0
+```
+
+If no `go` exists at all:
+```bash
+brew install go
+go install golang.org/dl/go1.24.0@latest
+go1.24.0 download
+ln -sf ~/go/bin/go1.24.0 ~/frontier-test/bin/go1.24.0
+```
+
+Tell the user: `Installed Go 1.24.0 locally at ~/frontier-test/bin/go1.24.0`
+
+#### Summary
+
+After all checks, print a summary:
+```
+Prerequisites:
+  PostgreSQL 15  ✓ (system)     /opt/homebrew/bin/psql
+  SpiceDB 1.34.0 ✓ (installed)  ~/frontier-test/bin/spicedb
+  Go 1.24.0      ✓ (system)     /opt/homebrew/bin/go
+```
 
 ### Port Conflict Detection
 
@@ -230,12 +321,16 @@ When the user asks to **stop**, **teardown**, or **cleanup** the local environme
 
 1. Kill Frontier process (using stored `frontier_pid`)
 2. Kill SpiceDB process (using stored `spicedb_pid`)
-3. Optionally drop the databases:
+3. If a local PostgreSQL was started (`pg_data_dir` exists in `.config.json`), stop it:
    ```bash
-   dropdb -U <PG_USER> -h <PG_HOST> -p <PG_PORT> "frontier_<SUFFIX>"
-   dropdb -U <PG_USER> -h <PG_HOST> -p <PG_PORT> "frontier_spicedb_<SUFFIX>"
+   <bin_pg_ctl> -D ~/frontier-test/pgdata stop
    ```
-4. Clean up `.config.json` by removing the setup-related keys
+4. Optionally drop the databases (use resolved `bin_dropdb` path):
+   ```bash
+   <bin_dropdb> -U <PG_USER> -h <PG_HOST> -p <PG_PORT> "frontier_<SUFFIX>"
+   <bin_dropdb> -U <PG_USER> -h <PG_HOST> -p <PG_PORT> "frontier_spicedb_<SUFFIX>"
+   ```
+5. Clean up `.config.json` by removing the setup-related keys
 
 Always confirm with the user before dropping databases.
 
