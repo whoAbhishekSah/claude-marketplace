@@ -424,6 +424,11 @@ If Frontier source is not already present at `~/raystack/frontier`, clone it:
 git clone https://github.com/raystack/frontier ~/raystack/frontier
 ```
 
+If Proton (proto definitions) is not already present at `~/raystack/proton`, clone it for RPC discovery:
+```bash
+git clone https://github.com/raystack/proton ~/raystack/proton
+```
+
 **Build cache**: Before building, check if a rebuild is actually needed:
 ```bash
 CURRENT_HASH=$(cd ~/raystack/frontier && git rev-parse HEAD)
