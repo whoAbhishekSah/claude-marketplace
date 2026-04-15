@@ -77,6 +77,10 @@ Update `.config.json` with the full set:
 }
 ```
 
+### Remote Host Safety Check
+
+If `pg_host` or `server` is **not** `localhost` / `127.0.0.1`, the user is pointing at a remote or shared environment. Before performing any destructive or state-changing action (creating databases, dropping databases, running migrations, starting/stopping services, seeding data), **always ask the user for explicit confirmation** with the exact action and target host. Do NOT proceed silently against remote hosts.
+
 ### Prerequisites Check
 
 Local binary directory: `~/frontier-test/bin/` (create if missing).
