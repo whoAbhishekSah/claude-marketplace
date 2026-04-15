@@ -77,9 +77,74 @@ Update `.config.json` with the full set:
 }
 ```
 
-### Remote Host Safety Check
+### Safety Rules
 
+These rules apply to ALL operations throughout this skill. Follow them strictly.
+
+#### Remote Host Protection
 If `pg_host` or `server` is **not** `localhost` / `127.0.0.1`, the user is pointing at a remote or shared environment. Before performing any destructive or state-changing action (creating databases, dropping databases, running migrations, starting/stopping services, seeding data), **always ask the user for explicit confirmation** with the exact action and target host. Do NOT proceed silently against remote hosts.
+
+#### Stale PID Detection
+Before killing any process by PID (from `frontier_pid`, `spicedb_pid` in `.config.json`), verify the PID actually belongs to the expected process:
+```bash
+ps -p <PID> -o comm= 2>/dev/null
+```
+- For `frontier_pid`, the process name should contain `frontier`
+- For `spicedb_pid`, the process name should contain `spicedb`
+
+If the PID doesn't exist or belongs to a different process, do NOT kill it. Warn the user that the stored PID is stale, remove it from `.config.json`, and check if the actual process is still running by port:
+```bash
+lsof -i :<PORT> -sTCP:LISTEN 2>/dev/null
+```
+
+#### Partial Setup Rollback
+If setup fails at any step, clean up everything that was created in earlier steps:
+- If Frontier build fails (Step 6) → kill SpiceDB process that was started in Step 4
+- If Frontier migration fails (Step 7) → kill SpiceDB, optionally drop the databases
+- If Frontier fails to start (Step 8) → kill SpiceDB
+
+Before rolling back, tell the user what failed and what will be cleaned up. If the user wants to keep the partial state (e.g., to debug), let them opt out of rollback.
+
+#### Config Backup
+Before overwriting `~/frontier-test/config.yaml`, check if it already exists. If it does, back it up:
+```bash
+cp ~/frontier-test/config.yaml ~/frontier-test/config.yaml.bak.$(date +%s)
+```
+Tell the user: `Backed up existing config to config.yaml.bak.<timestamp>`
+
+#### Graceful Shutdown
+When stopping Frontier or SpiceDB:
+1. Send `SIGTERM` first: `kill <PID>`
+2. Wait up to 5 seconds for the process to exit: `for i in $(seq 1 10); do kill -0 <PID> 2>/dev/null || break; sleep 0.5; done`
+3. Only if it's still running after 5 seconds, send `SIGKILL`: `kill -9 <PID>`
+4. Report which signal was needed
+
+Never use `kill -9` as the first action.
+
+#### Never Log Secrets
+When showing command output, curl responses, or logs to the user:
+- **Strip cookie values** — never show `sid=<actual_value>`, replace with `sid=***`
+- **Strip passwords** — never echo the PostgreSQL password from `.config.json`
+- **Strip session state tokens** — in auth flow responses, show the structure but mask the `state` value after use
+
+The cookie store file (`.cookies.json`) should never be printed unless the user explicitly asks to see cookies.
+
+#### Health Check Timeout
+When waiting for a service to become healthy (SpiceDB in Step 4, Frontier in Step 8):
+1. Check every 2 seconds
+2. Timeout after **30 seconds**
+3. If the service is not healthy after 30 seconds:
+   - Show the last 20 lines of the service's log file
+   - Tell the user what went wrong
+   - Ask if they want to retry, check logs, or abort (which triggers rollback)
+
+Do NOT wait indefinitely or retry in a silent loop.
+
+#### Database Name Verification Before Drop
+Before dropping any database during teardown:
+1. Verify the database name matches the pattern `frontier_<suffix>` or `frontier_spicedb_<suffix>` where `<suffix>` matches the `db_suffix` stored in `.config.json`
+2. Verify the database actually exists: `psql ... -c "SELECT 1 FROM pg_database WHERE datname = '<db_name>'" 2>/dev/null`
+3. If the name doesn't match the expected pattern or the suffix doesn't match `.config.json`, refuse to drop and warn the user
 
 ### Prerequisites Check
 
