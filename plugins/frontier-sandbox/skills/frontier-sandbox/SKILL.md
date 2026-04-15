@@ -86,6 +86,23 @@ Verify these are available on the system before proceeding:
 
 If any prerequisite is missing, tell the user what to install and stop.
 
+### Port Conflict Detection
+
+Before starting any services, check if the required ports are already in use:
+
+```bash
+lsof -i :8002 -sTCP:LISTEN 2>/dev/null   # Frontier ConnectRPC
+lsof -i :50052 -sTCP:LISTEN 2>/dev/null   # SpiceDB gRPC
+lsof -i :9000 -sTCP:LISTEN 2>/dev/null    # Frontier metrics
+```
+
+If any port is occupied:
+1. Show the user which port is in use and which process holds it (PID, process name)
+2. Offer options:
+   - **Kill the existing process** — if it looks like a stale Frontier/SpiceDB from a previous run
+   - **Use alternate ports** — pick free ports and update the config accordingly. If using alternate ports, update `spicedb_port` in `.config.json` and the `app.connect.port` / `spicedb.port` / `app.metrics_port` in the generated config.yaml
+3. Do NOT silently fail or overwrite a running service
+
 ### Step 1: Verify PostgreSQL Connectivity
 
 Before creating databases or running migrations, verify that the configured PostgreSQL credentials actually work:
@@ -231,6 +248,111 @@ When the user asks for **status** of the local environment:
 3. Check if PostgreSQL is accepting connections
 4. Report the database names, ports, and PIDs
 
+### Rebuild & Restart
+
+When the user asks to **rebuild**, **restart**, or says they **changed code**:
+
+1. Rebuild the Frontier binary from source:
+   ```bash
+   cd ~/raystack/frontier && CGO_ENABLED=0 go build -o ~/frontier-test/frontier .
+   ```
+2. If the build fails, show the error and stop — do NOT kill the running server
+3. If the build succeeds:
+   - Kill the existing Frontier process (using stored `frontier_pid`)
+   - Wait for the port to be free: `while lsof -i :8002 -sTCP:LISTEN >/dev/null 2>&1; do sleep 0.5; done`
+   - Start the new binary: `~/frontier-test/frontier server start -c ~/frontier-test/config.yaml`
+   - Store the new PID in `.config.json`
+   - Verify it's healthy with a curl check
+4. Do NOT restart SpiceDB or re-run migrations — only the Frontier process is affected
+
+If the user says **migrate and restart** or mentions schema changes, also run:
+```bash
+~/frontier-test/frontier server migrate -c ~/frontier-test/config.yaml
+```
+before starting the server.
+
+### Log Tailing
+
+When the user asks for **logs**, wants to **debug** a failed request, or asks **what went wrong**:
+
+Frontier and SpiceDB are started as background processes. Their stdout/stderr are captured in log files:
+
+- **Frontier logs**: `~/frontier-test/frontier.log`
+- **SpiceDB logs**: `~/frontier-test/spicedb.log`
+
+When starting services in background (Steps 4 and 8), redirect output to these files:
+```bash
+# SpiceDB (Step 4)
+spicedb serve ... > ~/frontier-test/spicedb.log 2>&1 &
+
+# Frontier (Step 8)
+~/frontier-test/frontier server start -c ~/frontier-test/config.yaml > ~/frontier-test/frontier.log 2>&1 &
+```
+
+To show logs:
+```bash
+# Last 50 lines of Frontier logs
+tail -50 ~/frontier-test/frontier.log
+
+# Last 50 lines of SpiceDB logs
+tail -50 ~/frontier-test/spicedb.log
+```
+
+When the user asks about a specific error or failed RPC:
+1. Read the last 50 lines of Frontier logs
+2. Look for error messages, stack traces, or the relevant RPC name
+3. Summarize what went wrong in plain language
+
+### Seed Data
+
+When the user asks to **seed**, **populate**, or wants **sample data** to work with, create a standard test environment using RPC calls:
+
+**Step 1: Authenticate as superadmin**
+Login as `admin1+sa@raystack.org` using the auto-login flow.
+
+**Step 2: Create test organizations**
+```bash
+# Create two orgs
+curl -s -X POST "http://<SERVER>/raystack.frontier.v1beta1.FrontierService/CreateOrganization" \
+  -H "connect-protocol-version: 1" \
+  -H "content-type: application/json" \
+  -H "Cookie: sid=<ADMIN_TOKEN>" \
+  -d '{"body":{"name":"org-alpha","title":"Alpha Organization"}}'
+
+curl -s -X POST "http://<SERVER>/raystack.frontier.v1beta1.FrontierService/CreateOrganization" \
+  -H "connect-protocol-version: 1" \
+  -H "content-type: application/json" \
+  -H "Cookie: sid=<ADMIN_TOKEN>" \
+  -d '{"body":{"name":"org-beta","title":"Beta Organization"}}'
+```
+
+**Step 3: Create test users by logging them in**
+Login as each user to auto-create their accounts:
+- `alice@raystack.org` — will be org admin
+- `bob@raystack.org` — will be org member
+- `charlie@raystack.org` — will be viewer
+
+**Step 4: Create projects**
+```bash
+curl -s -X POST "http://<SERVER>/raystack.frontier.v1beta1.FrontierService/CreateProject" \
+  -H "connect-protocol-version: 1" \
+  -H "content-type: application/json" \
+  -H "Cookie: sid=<ADMIN_TOKEN>" \
+  -d '{"body":{"name":"project-atlas","title":"Atlas Project","orgId":"<ORG_ALPHA_ID>"}}'
+```
+
+**Step 5: Report what was created**
+After seeding, print a summary table:
+```
+Seed data created:
+  Organizations: org-alpha, org-beta
+  Users: alice@raystack.org, bob@raystack.org, charlie@raystack.org
+  Projects: project-atlas (under org-alpha)
+  Admin: admin1+sa@raystack.org
+```
+
+The user can ask to seed at any time. If data already exists (org name conflict), skip and report which items were skipped.
+
 ---
 
 ## Services
@@ -289,11 +411,16 @@ Extract the `sid=` value from the `Set-Cookie` response header. Store it in the 
 Emails on `raystack.org` use the hardcoded OTP. No database access needed.
 
 - `user1@raystack.org` / `user2@raystack.org` / etc. — regular users
-- `user1+sa@raystack.org` — superuser variant
+- `user1+sa@raystack.org` — super admin variant
 
 **Only raystack.org users are supported for auto-login.** For real users, provide a cookie manually.
 
-### Super Admin Users
+### Super Admin vs Org Admin
+
+There are two kinds of "admin" in Frontier — don't confuse them:
+
+- **Super admin** (platform-level): Listed in `app.admin.users` in config.yaml. Has access to both FrontierService and AdminService. Created by adding `+sa` alias to the email (e.g., `admin1+sa@raystack.org`).
+- **Org admin** (org-level): A regular user who has been granted an admin/owner role within a specific organization. Can manage that org via FrontierService but has NO AdminService access.
 
 To get a super admin session, add `+sa` alias to the email:
 - Regular user: `user@raystack.org`
@@ -303,11 +430,13 @@ To get a super admin session, add `+sa` alias to the email:
 
 | Cookie Type | FrontierService | AdminService |
 |-------------|-----------------|--------------|
-| Admin cookie (superuser) | Yes | Yes |
-| User cookie | Yes | No |
+| Super admin cookie (`+sa` email) | Yes | Yes |
+| Regular user cookie | Yes | No |
 
-- AdminService requests require a superuser cookie (`+sa` email)
-- If the user asks to call AdminService without specifying a superuser email, ask for one
+- **Super admin** = users listed in `app.admin.users` in config.yaml (e.g., `admin1+sa@raystack.org`). These are platform-level admins with access to AdminService.
+- **Org admin** = users who have the admin/owner role within a specific organization. They can manage that org via FrontierService but do NOT have AdminService access.
+- AdminService requests require a **super admin** cookie (`+sa` email)
+- If the user asks to call AdminService without specifying a super admin email, ask for one
 
 ## Usage
 
@@ -315,7 +444,7 @@ When the user wants to test an RPC:
 
 1. Determine which email/user identity to use:
    - If the user specifies an email, use that
-   - If context makes it clear (e.g., "as admin"), use the appropriate stored cookie
+   - If context makes it clear (e.g., "as super admin" or "as admin1+sa"), use the appropriate stored cookie
    - If unclear, ask which user to act as
 2. Check the cookie store for a valid session for that email
 3. If no cookie exists, run the auto-login flow silently and store the cookie
@@ -336,6 +465,10 @@ Replace `<SERVER>` with the configured server address.
 
 ## Finding Available RPCs
 
+When the user asks to **list RPCs**, **find an RPC**, or asks **what RPCs are available**:
+
+### List RPCs
+
 ```bash
 # List all RPCs in FrontierService
 grep -E "^\s+rpc " ~/raystack/proton/raystack/frontier/v1beta1/frontier.proto
@@ -343,3 +476,43 @@ grep -E "^\s+rpc " ~/raystack/proton/raystack/frontier/v1beta1/frontier.proto
 # List all RPCs in AdminService
 grep -E "^\s+rpc " ~/raystack/proton/raystack/frontier/v1beta1/admin.proto
 ```
+
+### Proto-Aware RPC Discovery
+
+When the user asks about a **specific RPC** or wants to know **what fields to pass**, go deeper:
+
+1. Find the RPC definition and extract the request/response message names:
+   ```bash
+   grep -E "rpc <RPC_NAME>" ~/raystack/proton/raystack/frontier/v1beta1/frontier.proto
+   ```
+   This gives e.g. `rpc CreateOrganization(CreateOrganizationRequest) returns (CreateOrganizationResponse)`
+
+2. Find the request message definition and show its fields:
+   ```bash
+   # Search across all proto files in the frontier v1beta1 directory
+   grep -A 20 "message <RequestMessageName> {" ~/raystack/proton/raystack/frontier/v1beta1/*.proto
+   ```
+
+3. If a field references another message type (e.g., `OrganizationRequestBody body = 1`), recursively look up that message too.
+
+4. Present the information as a formatted summary, for example:
+   ```
+   CreateOrganization
+     Service: FrontierService
+     Request: CreateOrganizationRequest
+       - body (OrganizationRequestBody, required):
+           - name (string)
+           - title (string)
+           - metadata (google.protobuf.Struct)
+     Response: CreateOrganizationResponse
+       - organization (Organization)
+
+     Example curl:
+       curl -s -X POST "http://localhost:8002/raystack.frontier.v1beta1.FrontierService/CreateOrganization" \
+         -H "connect-protocol-version: 1" \
+         -H "content-type: application/json" \
+         -H "Cookie: sid=<TOKEN>" \
+         -d '{"body":{"name":"my-org","title":"My Org"}}'
+   ```
+
+5. Always generate a ready-to-use curl example with sensible placeholder values based on the field types.
