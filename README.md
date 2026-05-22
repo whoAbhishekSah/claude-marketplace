@@ -6,7 +6,7 @@ Claude Code plugins for Raystack services.
 
 ### frontier-sandbox
 
-A Claude Code skill to setup and test [Frontier](https://github.com/raystack/frontier) locally — both the **RPC layer** (ConnectRPC with auto-auth) and the **UI layer** (client-demo + admin-app driven through a real browser).
+A Claude Code skill to setup and test [Frontier](https://github.com/raystack/frontier) locally — both the **RPC layer** (ConnectRPC with auto-auth) and the **UI layer** (client-demo + admin web apps driven through a real browser).
 
 **Backend / RPC:**
 
@@ -22,7 +22,7 @@ A Claude Code skill to setup and test [Frontier](https://github.com/raystack/fro
 
 **UI (new in 2.0):**
 
-- **Drive client-demo and admin-app** through a real browser via [chrome-devtools-mcp](https://github.com/ChromeDevTools/chrome-devtools-mcp) — click buttons, fill forms, navigate, assert on screen state
+- **Drive client-demo and admin** through a real browser via [chrome-devtools-mcp](https://github.com/ChromeDevTools/chrome-devtools-mcp) — click buttons, fill forms, navigate, assert on screen state (apps live at `web/apps/client-demo` and `web/apps/admin` in the Frontier repo)
 - **Build and live-reload the Frontier JS SDK** — `pnpm install && pnpm run build` for the SDK, `pnpm run dev` for each app, with HMR for app source changes and a single `sdk rebuild` command for SDK changes
 - **Manage each app's `.env`** — read `FRONTIER_CONNECT_ENDPOINT`, repoint an app to another deployment (`point client-demo to <url>`) with backup and remote-host confirmation
 - **Real login flow** — drives the mailotp form just like a user, using the same `test_otp` and `+sa` conventions as the RPC flow
@@ -74,7 +74,7 @@ Once running, these work at any point in the conversation:
 | `list rpcs` / `show rpcs` | List available RPCs with field details |
 | `ui` / `open ui` | List the two web apps with status, pick one to launch |
 | `client-demo` / `open client-demo` | Build SDK (if needed), start client-demo, open in browser |
-| `admin-app` / `open admin-app` | Build SDK (if needed), start admin-app, open in browser |
+| `admin` / `open admin` | Build SDK (if needed), start admin, open in browser |
 | `sdk rebuild` / `rebuild sdk` | Rebuild SDK and refresh any running app tabs |
 | `ui status` | Show PID, port, and `FRONTIER_CONNECT_ENDPOINT` for each app |
 | `ui stop` / `stop ui` | Stop the app dev servers (backend keeps running) |
@@ -97,7 +97,7 @@ The skill handles authentication automatically using test users on `raystack.org
 
 Once you've run the backend (or pointed at an existing one), drive the apps through the browser:
 
-- "open admin-app" — builds SDK, runs `pnpm dev`, opens the URL, drives the super-admin login
+- "open admin" — builds SDK, runs `pnpm dev`, opens the URL, drives the super-admin login (needs Frontier's HTTP gateway on `:8000` as well as ConnectRPC on `:8002`)
 - "open client-demo" — same flow with a regular user
 - "click the Create Organization button and name it acme"
 - "go to Settings → Members and verify alice@raystack.org is listed"
@@ -154,5 +154,6 @@ plugins/
 
 ## Versions
 
-- **2.0.0** — adds UI testing for client-demo and admin-app via chrome-devtools-mcp, with SDK rebuild loop and `.env` endpoint management
+- **2.0.1** — corrections from a real end-to-end UI session: admin folder is `admin` not `admin-app`; admin uses two `.env` endpoint keys; documented chrome-devtools-mcp tool quirks (uid drift, sparse default snapshots, secret leakage via `wait_for`, dropdown-then-button click misroute, drill-into-detail for destructive actions); added Frontier role-name mapping (no "Admin" role — use "Organization Manager"); captured the real login route `/magiclink-verify`
+- **2.0.0** — adds UI testing for client-demo and admin via chrome-devtools-mcp, with SDK rebuild loop and `.env` endpoint management
 - **1.0.0** — initial release: RPC testing, Docker/local backend setup, auto-auth, seed data

@@ -12,7 +12,7 @@
       "name": "frontier-sandbox",
       "source": "./plugins/frontier-sandbox",
       "description": "Setup and test Frontier locally — ConnectRPC calls with auto-auth, plus UI testing of client-demo and admin-app via chrome-devtools-mcp (button clicks, form fills, live SDK rebuilds)",
-      "version": "2.0.0",
+      "version": "2.0.1",
       "author": {
         "name": "Abhishek Sah"
       }

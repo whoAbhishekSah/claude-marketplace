@@ -2,7 +2,7 @@
 
 Test Frontier locally end-to-end:
 - **RPC layer** — ConnectRPC calls with automatic authentication (built-in).
-- **UI layer** — drive the **client-demo** and **admin-app** web apps via [chrome-devtools-mcp](#ui-testing) (button clicks, form fills, navigation), with live SDK rebuilds.
+- **UI layer** — drive the **client-demo** and **admin** web apps via [chrome-devtools-mcp](#ui-testing) (button clicks, form fills, navigation), with live SDK rebuilds.
 
 Optionally includes full setup of Frontier with all dependencies. Dependencies (PostgreSQL + SpiceDB) run in **Docker by default** via a provided compose file; a fully-local install is offered as an alternative. Frontier itself is always built from source.
 
@@ -68,11 +68,11 @@ At any point during the conversation, recognize these as quick actions — do NO
 | **list rpcs** / **show rpcs** | [Finding Available RPCs](#finding-available-rpcs) |
 | **ui** / **open ui** | [UI Testing](#ui-testing) — list apps and pick one |
 | **client-demo** / **open client-demo** | Start client-demo, open in browser ([UI Testing](#ui-testing)) |
-| **admin-app** / **open admin-app** | Start admin-app, open in browser ([UI Testing](#ui-testing)) |
+| **admin** / **open admin** | Start admin app, open in browser ([UI Testing](#ui-testing)) |
 | **sdk rebuild** / **rebuild sdk** | Rebuild SDK and refresh running apps ([Rebuild Loop](#rebuild-loop-sdk-changes)) |
 | **ui status** | Show ports/PIDs/endpoints for the web apps |
 | **ui stop** / **stop ui** | Stop the app dev servers (leaves backend running) |
-| **point client-demo to &lt;url&gt;** / **point admin-app to &lt;url&gt;** | Update `FRONTIER_CONNECT_ENDPOINT` in that app's `.env`, restart |
+| **point client-demo to &lt;url&gt;** / **point admin to &lt;url&gt;** | Rewrite the relevant `FRONTIER_*` endpoint key in that app's `.env`, restart |
 | **reconfigure** | Re-run [First-time Config](#first-time-config) |
 
 ---
@@ -615,7 +615,7 @@ Things to try:
   "teardown" — stop everything
 
 UI testing (see "UI Testing" section):
-  "open client-demo"  / "open admin-app"  — launch in browser
+  "open client-demo"  / "open admin"  — launch in browser
   "sdk rebuild"       — pick up SDK changes
   "ui status"         — what's running on the web side
   "point client-demo to <url>" — repoint an app at a different Frontier
@@ -939,12 +939,16 @@ When the user asks about a **specific RPC** or wants to know **what fields to pa
 
 Drive the two Frontier web apps through a real browser so UI engineers can exercise full user flows (button clicks, form fills, navigation, table assertions) without leaving the skill. Both apps live in the frontier monorepo, share a JS SDK, and talk to the same ConnectRPC backend the [RPC flow](#services) already targets.
 
-| App | Purpose | Who can sign in |
-|-----|---------|-----------------|
-| **client-demo** | End-user-facing demo app (sign-in, orgs, projects, settings) | Any logged-in user |
-| **admin-app** | Platform admin UI | Super admins only (`+sa` users in `app.admin.users`) |
+| App | Folder | Purpose | Who can sign in | `.env` keys |
+|-----|--------|---------|-----------------|-------------|
+| **client-demo** | `web/apps/client-demo` | End-user-facing demo app (sign-in, orgs, projects, settings) | Any logged-in user | `FRONTIER_CONNECT_ENDPOINT` |
+| **admin** | `web/apps/admin` | Platform admin UI | Super admins only (`+sa` users in `app.admin.users`) | `FRONTIER_API_URL` (port 8000 HTTP API) + `FRONTIER_CONNECTRPC_URL` (port 8002) |
 
-Both apps consume the **Frontier JS SDK**. Any SDK source change requires `pnpm run build` in the SDK package before the apps pick it up; app source changes are picked up by Vite HMR automatically.
+> Note: the admin app folder is **`admin`**, not `admin-app`. The package name in `package.json` is `admin`. Don't try to write to `apps/admin-app/` — it doesn't exist.
+
+Both apps consume the **Frontier JS SDK** (`web/sdk`, package `@raystack/frontier`, built via `tsup`). Any SDK source change requires `pnpm run build` in the SDK package before the apps pick it up; app source changes are picked up by Vite HMR automatically.
+
+The two apps don't share the same backend ports: client-demo talks to ConnectRPC on `:8002` only, while admin needs **both** `:8000` (gRPC-gateway HTTP API) and `:8002` (ConnectRPC). If your local Frontier setup only runs ConnectRPC, the admin app will partially work — sign-in via mailotp works (it goes through `:8002`) but pages that depend on the HTTP API will fail to load. Surface this clearly before launching admin if `:8000` is not listening.
 
 ### UI Prerequisites
 
@@ -965,7 +969,7 @@ On the first UI command (or if `.config.json` has no `ui` block), discover the w
 FRONTIER=~/raystack/frontier
 
 # Find the web/JS workspace root (must contain a pnpm-workspace.yaml)
-for candidate in "$FRONTIER/sdks/js" "$FRONTIER/web" "$FRONTIER"; do
+for candidate in "$FRONTIER/web" "$FRONTIER/sdks/js" "$FRONTIER"; do
   if [ -f "$candidate/pnpm-workspace.yaml" ]; then
     echo "WEB_ROOT=$candidate"; break
   fi
@@ -977,32 +981,45 @@ If none of the candidates have `pnpm-workspace.yaml`, ask the user for the absol
 From `WEB_ROOT`, locate the two apps and the SDK. Read `pnpm-workspace.yaml` for the glob patterns, then resolve concrete paths:
 
 ```bash
-# Apps — usually web/apps/client-demo and web/apps/admin-app, but names can drift
+# Apps — usually web/apps/client-demo and web/apps/admin, but names can drift
 ls -d "$WEB_ROOT"/apps/*/  2>/dev/null
 # SDK — try common locations
 ls -d "$WEB_ROOT"/sdk        2>/dev/null
 ls -d "$WEB_ROOT"/packages/* 2>/dev/null
 ```
 
-Match folders by their `package.json` `name` field when names are ambiguous. If `client-demo` or `admin-app` aren't both present under `apps/`, surface the list of detected app folders and ask the user which is which.
+Match folders by their `package.json` `name` field when names are ambiguous. The current Frontier layout has `apps/admin` (not `admin-app`) — never assume the dashed form. If both folders are not present under `apps/`, surface the detected list and ask the user which is which.
+
+Pick the right endpoint env keys per app by reading the existing `.env`/`.env.example`:
+
+```bash
+grep -E '^(VITE_)?FRONTIER_[A-Z_]+_(URL|ENDPOINT)=' <app_path>/.env <app_path>/.env.example 2>/dev/null
+```
+
+- client-demo: typically a single `FRONTIER_CONNECT_ENDPOINT` (ConnectRPC).
+- admin: typically **two** keys — `FRONTIER_API_URL` (gRPC-gateway HTTP API, port 8000) and `FRONTIER_CONNECTRPC_URL` (ConnectRPC, port 8002). When the user says `point admin to <url>`, only rewrite `FRONTIER_CONNECTRPC_URL` by default (the HTTP gateway is usually a different deployment target). Confirm if unsure.
 
 Save under a new `ui` block in `.config.json`:
 ```json
 {
   "ui": {
-    "web_root": "/Users/<you>/raystack/frontier/sdks/js",
-    "sdk_path": "/Users/<you>/raystack/frontier/sdks/js/sdk",
+    "web_root": "/Users/<you>/raystack/frontier/web",
+    "sdk_path": "/Users/<you>/raystack/frontier/web/sdk",
+    "sdk_package_name": "@raystack/frontier",
+    "sdk_build_script": "build",
     "sdk_source_git_hash": null,
     "apps": {
       "client-demo": {
-        "path": "/Users/<you>/raystack/frontier/sdks/js/apps/client-demo",
-        "default_endpoint": "http://localhost:8002",
+        "path": "/Users/<you>/raystack/frontier/web/apps/client-demo",
+        "endpoint_env_keys": ["FRONTIER_CONNECT_ENDPOINT"],
+        "repoint_keys": ["FRONTIER_CONNECT_ENDPOINT"],
         "pid": null,
         "actual_port": null
       },
-      "admin-app": {
-        "path": "/Users/<you>/raystack/frontier/sdks/js/apps/admin-app",
-        "default_endpoint": "http://localhost:8002",
+      "admin": {
+        "path": "/Users/<you>/raystack/frontier/web/apps/admin",
+        "endpoint_env_keys": ["FRONTIER_API_URL", "FRONTIER_CONNECTRPC_URL"],
+        "repoint_keys": ["FRONTIER_CONNECTRPC_URL"],
         "pid": null,
         "actual_port": null
       }
@@ -1011,7 +1028,7 @@ Save under a new `ui` block in `.config.json`:
 }
 ```
 
-Apply `chmod 600 ~/frontier-test/.config.json` after writing (per [File Permissions](#file-permissions)).
+`endpoint_env_keys` is the full set the skill should display in `ui status`. `repoint_keys` is the subset that the `point <app> to <url>` command rewrites — by design narrower so the rewrite doesn't clobber unrelated endpoints. Apply `chmod 600 ~/frontier-test/.config.json` after writing (per [File Permissions](#file-permissions)).
 
 ### Reading and Writing App `.env`
 
@@ -1025,7 +1042,11 @@ grep -E '^(FRONTIER_CONNECT_ENDPOINT|VITE_FRONTIER_CONNECT_ENDPOINT)=' <app_path
 
 **Default** — when the user hasn't customised: `FRONTIER_CONNECT_ENDPOINT='http://localhost:8002'` (matches the local Frontier from [Step 8](#step-8-start-frontier-in-background)).
 
-**Writing** — when the user says `point client-demo to <url>` (or `admin-app`):
+**Writing** — when the user says `point client-demo to <url>` (or `point admin to <url>`):
+
+Use the `repoint_keys` stored in `.config.json` for that app — never blanket-rewrite every `FRONTIER_*_URL` line. For admin, that defaults to **only** `FRONTIER_CONNECTRPC_URL`. If the user says "repoint both" or names a specific key, honour that.
+
+
 1. If `<url>` is not `localhost` / `127.0.0.1`, apply [Remote Host Protection](#remote-host-protection) — show the exact target and require an explicit confirmation. Even a read-only-looking UI can trigger writes via the SDK.
 2. If `.env` exists, back it up: `cp <app_path>/.env <app_path>/.env.bak.$(date +%s)`. If only `.env.example` exists, copy it to `.env` first.
 3. Read `.env` line-by-line. Replace the existing `FRONTIER_CONNECT_ENDPOINT=` (or `VITE_FRONTIER_CONNECT_ENDPOINT=`) line, preserving all other entries. If the key is absent, append it.
@@ -1060,7 +1081,7 @@ If the SDK package doesn't define a `build` script, look at `package.json` for t
 
 ### Start an App in the Background
 
-For client-demo or admin-app:
+For client-demo or admin:
 
 ```bash
 APP_DIR=<app_path>
@@ -1073,7 +1094,7 @@ chmod 600 "$APP_DIR/.dev.log" "$APP_DIR/.dev.pid"
 
 Save the PID under `ui.apps.<name>.pid` in `.config.json`.
 
-**Detect the bound port.** Vite picks a free port if the default is taken, so don't assume `5173`/`5174`. Tail the log until a URL appears (apply [Health Check Timeout](#health-check-timeout) — 30s cap):
+**Detect the bound port.** Vite versions and per-app `vite.config.*` settings vary — observed defaults in this codebase include `:3000` for client-demo, but it can change. Never hardcode a port. Tail the log until a URL appears (apply [Health Check Timeout](#health-check-timeout) — 30s cap):
 
 ```bash
 # Poll the log up to 30s
@@ -1112,10 +1133,14 @@ After each meaningful action, take a follow-up snapshot and tell the user **what
 Both apps use the mailotp flow that the [Automatic Login](#automatic-login-mailotp-flow) section already documents. In the UI:
 
 1. Use the configured `test_otp` and `test_domain` (`raystack.org`) from `.config.json` — same source of truth as the RPC flow.
-2. For **admin-app**, the email must be a super admin (`+sa` variant). If the user doesn't specify one, default to `admin1+sa@raystack.org`.
+2. For **admin**, the email must be a super admin (`+sa` variant). If the user doesn't specify one, default to `admin1+sa@raystack.org`.
 3. For **client-demo**, any `raystack.org` email works; default to `user1@raystack.org` if unspecified.
-4. Drive the form: type email → click "Send OTP" (or whatever the button reads) → type `test_otp` → click "Verify" (or equivalent). Re-check the DOM after each step — don't blast all clicks before the next view renders.
-5. If login fails (wrong email domain, backend down, OTP rejected), surface the on-screen error message verbatim. Don't retry silently more than once.
+4. Drive the form, watching for these concrete button/page labels in the current Frontier UI:
+   - The button reads **"Continue with Email"** (not "Send OTP"). Clicking it reveals an email textbox + a now-enabled "Continue with Email" button.
+   - After submitting the email, the page redirects to **`/magiclink-verify?state=<uuid>&email=<urlencoded>`** with heading "Check your email" and an "Enter OTP" textbox. Despite the route name including "magiclink", entering the configured `test_otp` and clicking "Submit OTP" completes the flow.
+   - On success, the user lands on `/` (client-demo) with the user initial visible in the top-right menu button.
+5. Re-check the DOM after each step — don't blast all clicks before the next view renders.
+6. If login fails (wrong email domain, backend down, OTP rejected), surface the on-screen error message verbatim. Don't retry silently more than once.
 
 The skill must NOT bypass the UI to forge a cookie — the point of UI testing is exercising the real flow. If the user explicitly says "skip the login UI", do the [Automatic Login](#automatic-login-mailotp-flow) curl flow, drop the `sid` cookie into the browser via a chrome-devtools-mcp cookie tool, and reload.
 
@@ -1147,12 +1172,14 @@ For the SDK:
 
 Format the output as a compact table, e.g.:
 ```
-App           PID    Port   Endpoint                  Browser
-client-demo   12345  5173   http://localhost:8002     open
-admin-app     —      —      http://localhost:8002     —
+App           PID    Port   Endpoint                                 Browser
+client-demo   12345  3000   FRONTIER_CONNECT_ENDPOINT=…:8002         open
+admin         —      —      FRONTIER_API_URL=…:8000, …RPC_URL=…:8002 —
 
 SDK build:    commit a1b2c3d (matches HEAD)
 ```
+
+For the admin app, show both endpoint env values (one per line if it doesn't fit on one row). If the configured `FRONTIER_API_URL` host is not reachable, append a small warning: `(WARN: API URL host not reachable — UI will partially fail)`.
 
 ### UI Teardown
 
@@ -1165,11 +1192,55 @@ When the user says `ui stop` / `stop ui`, or as part of full `teardown`:
 
 If the user says "teardown everything", run UI teardown first, then the [backend Teardown](#teardown) section.
 
+### Role-Name Mapping
+
+Frontier's UI exposes these org-level roles (verified in client-demo invite flow):
+
+| Role in UI | What the user usually means |
+|---|---|
+| **Organization Owner** | "owner", "founder" |
+| **Organization Manager** | "admin", "org admin", "full admin access" |
+| **Organization Access Manager** | "access admin", "permissions manager" |
+| **Organization Viewer** | "read-only", "viewer" |
+| **Billing Manager** | "billing admin" |
+
+There is **no role literally called "Admin"**. When the user says "invite X as org admin", select **Organization Manager** and tell them which one you picked. If they meant Owner, swap. Don't guess silently.
+
+Newly-invited members appear in the table as **"Member (Pending invite)"** until they accept — the chosen role only applies post-acceptance. Use this row text in `wait_for` after sending an invite.
+
+### chrome-devtools-mcp — Tool Quirks That Trip the Skill
+
+These are real behaviours observed driving client-demo. Follow them or the skill leaks secrets, clicks the wrong thing, or stares at empty snapshots.
+
+1. **uids reset on every navigation.** `take_snapshot` returns a fresh id space after each page load. NEVER reuse a uid from a previous snapshot after `navigate_page`, after a route-changing click, or after a server redirect (e.g. login → `/`). Always re-snapshot first.
+
+2. **Default snapshots hide tabular data.** For tabular settings pages (Projects, Members, Service Accounts, Personal Access Tokens), the row containers are wrapped in non-semantic divs that the a11y tree marks as `ignored`. The plain snapshot returns only headings + column labels. **Use `take_snapshot({verbose: true})` for any tabular view.** Even with `verbose: true`, per-row inline action menus are sometimes unreachable from the a11y tree — for destructive actions, drill into the detail page (e.g. click the row name) and use the page-header action menu there.
+
+3. **`wait_for` always returns the full DOM snapshot. There is no opt-out.** This means if you `wait_for` text on a page that displays a freshly-issued secret (Initial Generated Key for a service account, PAT value), that secret lands in your conversation context. There is no flag to suppress it.
+
+4. **Credential-creation safe pattern.** For service accounts, PATs, and any flow that lands on a page showing a one-time secret immediately after submission:
+
+   ```
+   click(submit_button_uid)                                  # do NOT pass includeSnapshot
+   navigate_page("http://…/<parent-list-url>")               # navigate AWAY before reading
+   wait_for(["<toast or row-text from list page>"])          # now safe — the secret-bearing page is gone
+   ```
+
+   Empirical: in client-demo, the "Initial Generated Key" Basic auth token is **one-time display** — it disappears from the DOM once you navigate away from the detail page. So the navigate-then-wait pattern genuinely removes the leak from any subsequent snapshot.
+
+   Conversely: `click({includeSnapshot: true})` after submitting and `wait_for` on the detail page DO leak the key into the conversation. If you find yourself thinking "I just need to confirm it worked," prefer toast text from the list page over snapshotting the detail page.
+
+5. **Multi-select dropdowns: click the inner checkbox, not the option.** In Frontier's project picker (and elsewhere), clicking the `option` element moves focus but does NOT toggle the checkbox state. Click the nested `checkbox` element directly (uid one level deeper than the option). Verify the combobox's `value=` attribute updated before continuing.
+
+6. **Close open dropdowns before clicking dialog primary actions.** When a select menu is open inside a modal dialog, clicking the dialog's "Create"/"Save" button at the bottom can register on a focused option in the overlay menu instead of the button below, silently toggling the option off and not submitting the form. Always click the combobox to collapse it first, then click the primary action.
+
+7. **For destructive actions on tabular settings pages, drill into the detail page.** Service Accounts, PATs etc. expose per-row action menus that aren't in the a11y snapshot. Click the row name → wait for "<entity> actions" (or similar) button in the breadcrumb header → open menu → choose "Delete". Confirm dialog (`alertdialog` role) → click "Delete".
+
 ### Safety Recap for UI
 
 The general [Safety Rules](#safety-rules) all apply. Specifically for UI work:
 
 - **Remote endpoint** — pointing an app at a non-localhost `FRONTIER_CONNECT_ENDPOINT` requires explicit confirmation. A UI action can mutate prod data faster than a typoed curl.
-- **No screenshots of secrets** — if the page being captured shows a token, API key, or other sensitive value, mask it or skip the screenshot. Screenshots land in `~/frontier-test/ui-screenshots/` with `chmod 600`.
+- **No screenshots of secrets** — if the page being captured shows a token, API key, or other sensitive value, mask it or skip the screenshot. Screenshots land in `~/frontier-test/ui-screenshots/` with `chmod 600`. Note also that *snapshots* (not just screenshots) leak — see [chrome-devtools-mcp Tool Quirks](#chrome-devtools-mcp--tool-quirks-that-trip-the-skill) item 3.
 - **No silent .env rewrites** — back up the file, change one line, show the diff.
 - **PID identity** — Vite dev servers are `node` processes; confirm via `ps -p <PID> -o command=` that the command line includes the app path before killing.
