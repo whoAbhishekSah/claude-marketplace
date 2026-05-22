@@ -154,6 +154,7 @@ plugins/
 
 ## Versions
 
+- **2.1.0** — switches every decision point to Claude Code's `AskUserQuestion` picker (radio buttons / multi-select with descriptions) instead of prose questions. Adds a top-level "User Interaction Style" section and concrete picker templates at 14 decision points: startup action, setup mode, port conflict, Docker prereqs fallback, health-check failure, teardown scope (Docker / UI / everything), remote-host confirmation, seed conflicts, app selection (`ui`), path-discovery folder ambiguity, `point <app> to <url>` confirmation, and Frontier role mapping.
 - **2.0.1** — corrections from a real end-to-end UI session: admin folder is `admin` not `admin-app`; admin uses two `.env` endpoint keys; documented chrome-devtools-mcp tool quirks (uid drift, sparse default snapshots, secret leakage via `wait_for`, dropdown-then-button click misroute, drill-into-detail for destructive actions); added Frontier role-name mapping (no "Admin" role — use "Organization Manager"); captured the real login route `/magiclink-verify`
 - **2.0.0** — adds UI testing for client-demo and admin via chrome-devtools-mcp, with SDK rebuild loop and `.env` endpoint management
 - **1.0.0** — initial release: RPC testing, Docker/local backend setup, auto-auth, seed data

@@ -19,6 +19,26 @@ Optionally includes full setup of Frontier with all dependencies. Dependencies (
 
 ---
 
+## User Interaction Style
+
+For every decision in this skill where the user picks from a fixed set of choices, **use the `AskUserQuestion` tool** rather than printing a prose question and waiting for typed input. The tool renders a radio-button (or multi-select) picker in the UI and returns a structured answer — clearer for the user, no parsing ambiguity for the skill.
+
+Constraints (from the tool itself):
+- 1–4 options per question. If the real choice has 5+, group or use multiSelect.
+- `preview` (monospace mockup pane) is single-select only.
+- Do NOT include an "Other" option — the UI adds one automatically.
+- Mark the safest / most common choice with `"(Recommended)"` in the label and put it first.
+- For non-mutually-exclusive choices set `multiSelect: true`.
+
+When NOT to use `AskUserQuestion`:
+- Free-form values: server address, OTP code, project name, email to log in as, etc. → plain text prompt.
+- Pure confirmations during a destructive flow where "Cancel" is the only meaningful alternative — `AskUserQuestion` with two options (e.g. "Proceed" / "Cancel") is still preferred over yes/no prose, because it forces an explicit click.
+- Informational messages (no choice required) — just print text.
+
+Throughout the rest of this file, every decision point gives a concrete template. Treat those templates as the canonical wording — keep the questions and option labels stable so users see the same UI for the same decision across sessions.
+
+---
+
 ## Startup Behavior
 
 On startup, do NOT print cookies or check env vars.
@@ -45,14 +65,25 @@ Decision:
 
 ### Normal Startup Flow
 
-**Ask the user one question:**
+Use `AskUserQuestion`:
 
-> Would you like to:
-> 1. **Setup Frontier** — start dependencies (PostgreSQL + SpiceDB), build Frontier from source, run migrations, start the server
-> 2. **Skip to testing** — I already have Frontier running, just help me test RPCs
+```
+question: "What would you like to do?"
+header:   "Action"
+multiSelect: false
+options:
+  - label: "Setup Frontier (Recommended)"
+    description: "Start dependencies (PostgreSQL + SpiceDB), build Frontier from source, run migrations, start the server."
+  - label: "Skip to testing"
+    description: "I already have Frontier running somewhere. Just collect server address + OTP and help me test RPCs."
+  - label: "UI only"
+    description: "Skip the backend setup. I have Frontier reachable elsewhere — jump straight to building the SDK and launching client-demo or admin via chrome-devtools-mcp."
+```
 
-- If the user picks **1**, go to [Environment Setup](#environment-setup)
-- If the user picks **2**, go to [First-time Config](#first-time-config) (just collect server address and OTP), then proceed to [Usage](#usage)
+Route by selection:
+- "Setup Frontier" → [Environment Setup](#environment-setup)
+- "Skip to testing" → [First-time Config](#first-time-config) (collect server address and OTP), then [Usage](#usage)
+- "UI only" → [First-time Config](#first-time-config) for server/OTP, then [UI Testing](#ui-testing) path discovery
 
 ### Shorthand Commands
 
@@ -102,13 +133,22 @@ On subsequent runs, silently load the config. If the user wants to change settin
 
 ## Environment Setup
 
-When the user chooses to setup Frontier, first pick a **setup mode**. In both modes, Frontier itself is built from source (so you can iterate on code). Only the dependencies differ:
+When the user chooses to setup Frontier, first pick a **setup mode**. In both modes, Frontier itself is built from source (so you can iterate on code). Only the dependencies differ.
 
-> Which setup mode would you like?
-> 1. **Docker** *(default, recommended)* — runs PostgreSQL and SpiceDB in containers via a provided docker-compose file. No local install of PG/SpiceDB needed. Choose this unless you have a reason not to.
-> 2. **Local** — installs PostgreSQL 15 and SpiceDB v1.34.0 locally (into `~/frontier-test/bin/`, without touching your global setup) and runs them as background processes.
+Use `AskUserQuestion`:
 
-Save the choice under `setup_mode` in `.config.json`. If the user just hits enter or says "default", pick `"docker"`.
+```
+question: "How should I run PostgreSQL and SpiceDB?"
+header:   "Setup mode"
+multiSelect: false
+options:
+  - label: "Docker (Recommended)"
+    description: "Runs PostgreSQL and SpiceDB in containers via the provided docker-compose file. No local install of PG/SpiceDB needed — just Docker and Go 1.24+."
+  - label: "Local"
+    description: "Installs PostgreSQL 15 and SpiceDB v1.34.0 locally (into ~/frontier-test/bin/, without touching your global setup) and runs them as background processes."
+```
+
+Save the chosen value (`"docker"` or `"local"`) under `setup_mode` in `.config.json`.
 
 Then collect the [First-time Config](#first-time-config) values. The additional PG credential questions differ by mode:
 
@@ -161,7 +201,22 @@ Example for local mode:
 These rules apply to ALL operations throughout this skill. Follow them strictly.
 
 #### Remote Host Protection
-If `pg_host` or `server` is **not** `localhost` / `127.0.0.1`, the user is pointing at a remote or shared environment. Before performing any destructive or state-changing action (creating databases, dropping databases, running migrations, starting/stopping services, seeding data), **always ask the user for explicit confirmation** with the exact action and target host. Do NOT proceed silently against remote hosts.
+If `pg_host` or `server` is **not** `localhost` / `127.0.0.1`, the user is pointing at a remote or shared environment. Before performing any destructive or state-changing action (creating databases, dropping databases, running migrations, starting/stopping services, seeding data), **always ask the user for explicit confirmation** via `AskUserQuestion`:
+
+```
+question: "<ACTION_VERB_NOUN> on remote host <host>?"
+header:   "Remote action"
+multiSelect: false
+options:
+  - label: "Cancel (Recommended)"
+    description: "Don't run this. I'll review the target and re-issue the command myself if I really want it."
+  - label: "Proceed"
+    description: "Yes, run <ACTION> against <host>. I know this is not localhost and accept the impact."
+```
+
+Spell out the exact verb+noun in the question (e.g. "Drop database `frontier_prod` on remote host `db.example.com`?"). Put "Cancel" first as the recommended option — the user has to actively choose to proceed.
+
+Do NOT proceed silently against remote hosts. Do NOT collapse the prompt to a yes/no in prose — the picker keeps the answer auditable.
 
 #### Stale PID Detection
 Before killing any process by PID (from `frontier_pid`, `spicedb_pid` in `.config.json`), verify the PID actually belongs to the expected process:
@@ -215,7 +270,20 @@ When waiting for a service to become healthy (SpiceDB in Step 4, Frontier in Ste
 3. If the service is not healthy after 30 seconds:
    - Show the last 20 lines of the service's log file
    - Tell the user what went wrong
-   - Ask if they want to retry, check logs, or abort (which triggers rollback)
+   - Ask via `AskUserQuestion`:
+
+     ```
+     question: "<Service> didn't become healthy in 30s. What now?"
+     header:   "Health check failed"
+     multiSelect: false
+     options:
+       - label: "Retry (give it another 30s)"
+         description: "Some setups boot slowly under load. Re-poll for 30 more seconds."
+       - label: "Show more logs"
+         description: "Print the last 200 lines of the log file so I can diagnose."
+       - label: "Abort & rollback (Recommended)"
+         description: "Stop here. Trigger the partial-setup rollback to clean up what was started."
+     ```
 
 Do NOT wait indefinitely or retry in a silent loop.
 
@@ -246,9 +314,21 @@ Use this path when `setup_mode == "docker"` (the default). It collapses local st
 
 **Check**: `docker --version` and `docker compose version` (or `docker-compose --version`). Also run `docker info` to confirm the Docker daemon is actually reachable.
 
-- If Docker isn't installed or the daemon isn't running, **stop and tell the user**. Do NOT try to `brew install docker` silently — Docker Desktop / Colima / OrbStack is a user-level install choice. Offer:
-  - Retry after they start Docker Desktop
-  - Fall back to [Local Setup Path](#prerequisites-check) (rerun setup with `setup_mode = "local"`)
+- If Docker isn't installed or the daemon isn't running, **stop and tell the user**. Do NOT try to `brew install docker` silently — Docker Desktop / Colima / OrbStack is a user-level install choice. Ask via `AskUserQuestion`:
+
+  ```
+  question: "Docker isn't running. How do you want to proceed?"
+  header:   "Docker missing"
+  multiSelect: false
+  options:
+    - label: "Retry — I just started Docker"
+      description: "Re-run the docker daemon check. Pick this after starting Docker Desktop / Colima / OrbStack."
+    - label: "Fall back to local mode"
+      description: "Rerun setup with setup_mode = local — installs PostgreSQL 15 and SpiceDB v1.34.0 into ~/frontier-test/bin/."
+    - label: "Cancel"
+      description: "Stop setup. I'll install Docker myself and re-run later."
+  ```
+
 - **Go >= 1.24.0** is still required to build Frontier from source. Use the same check/install logic as [Go >= 1.24.0](#3-go--1240) below.
 
 Docker mode does NOT need local `psql`/`createdb`/`dropdb`/`spicedb` binaries. All DB work happens through the postgres container via `docker exec` or short-lived `psql` invocations inside the container.
@@ -411,10 +491,22 @@ lsof -i :9000 -sTCP:LISTEN 2>/dev/null    # Frontier metrics
 
 If any port is occupied:
 1. Show the user which port is in use and which process holds it (PID, process name)
-2. Offer options:
-   - **Kill the existing process** — if it looks like a stale Frontier/SpiceDB from a previous run
-   - **Use alternate ports** — pick free ports and update the config accordingly. If using alternate ports, update `spicedb_port` in `.config.json` and the `app.connect.port` / `spicedb.port` / `app.metrics_port` in the generated config.yaml
-3. Do NOT silently fail or overwrite a running service
+2. Ask via `AskUserQuestion`:
+
+   ```
+   question: "Port <PORT> is in use by PID <PID> (<process>). How should I proceed?"
+   header:   "Port conflict"
+   multiSelect: false
+   options:
+     - label: "Kill the existing process"
+       description: "Send SIGTERM (then SIGKILL after 5s) to PID <PID>. Choose this if it looks like a stale Frontier/SpiceDB from a previous run."
+     - label: "Use alternate ports (Recommended)"
+       description: "Pick free ports for Frontier/SpiceDB/metrics and update .config.json + config.yaml accordingly. Safer if you're not sure what's holding the port."
+     - label: "Cancel setup"
+       description: "Stop here. I'll investigate the conflict myself and re-run setup later."
+   ```
+
+3. Do NOT silently fail or overwrite a running service. If the user picks "Use alternate ports", prompt with free-text input for the new port number(s), then update `spicedb_port` in `.config.json` and `app.connect.port` / `spicedb.port` / `app.metrics_port` in the generated config.yaml.
 
 ### Resume After Failure
 
@@ -628,9 +720,21 @@ When the user asks to **stop**, **teardown**, or **cleanup** the environment, br
 **Common first step (both modes):** Kill the Frontier process using stored `frontier_pid` (apply [Graceful Shutdown](#graceful-shutdown) and [Stale PID Detection](#stale-pid-detection)).
 
 **If `setup_mode == "docker"`:**
-1. Ask the user whether to **keep** or **drop** data (the persistent named volume):
-   - **Stop only** — containers down, volume kept: `docker compose -f <compose_file> -p frontier-sandbox down`
-   - **Full cleanup** — drops the volume (both databases go with it): `docker compose -f <compose_file> -p frontier-sandbox down -v`
+1. Ask via `AskUserQuestion`:
+
+   ```
+   question: "Teardown mode for docker setup?"
+   header:   "Teardown"
+   multiSelect: false
+   options:
+     - label: "Stop only (Recommended)"
+       description: "Containers down, volume kept (data survives). Same as `docker compose down`. Use when you want to resume later with the same DB state."
+     - label: "Full cleanup"
+       description: "Drops the persistent volume — both databases go with it. Same as `docker compose down -v`. Use when you want a clean slate next time."
+     - label: "Cancel"
+       description: "Don't touch the containers. Leave everything running."
+   ```
+
 2. Remove `frontier_pid` and setup container keys from `.config.json` (keep `setup_mode` so the next run remembers the choice, unless the user asks to reconfigure).
 
 **If `setup_mode == "local"`:**
@@ -767,7 +871,22 @@ Seed data created:
   Admin: admin1+sa@raystack.org
 ```
 
-The user can ask to seed at any time. If data already exists (org name conflict), skip and report which items were skipped.
+The user can ask to seed at any time. If any item already exists (org name conflict, project name conflict), ask via `AskUserQuestion` instead of silently deciding:
+
+```
+question: "Some seed items already exist. How should I handle conflicts?"
+header:   "Seed conflict"
+multiSelect: false
+options:
+  - label: "Skip existing (Recommended)"
+    description: "Leave existing items alone, only create the ones that don't exist. Safe default."
+  - label: "Use unique suffix"
+    description: "Append a short random suffix to conflicting names (e.g. org-alpha-a3f1) so everything gets created fresh alongside the existing data."
+  - label: "Abort seed"
+    description: "Stop. I'll clean up myself and re-run seed once the existing items are gone."
+```
+
+After seeding, print the summary table listing exactly which items were created vs skipped vs suffixed.
 
 ---
 
@@ -950,6 +1069,27 @@ Both apps consume the **Frontier JS SDK** (`web/sdk`, package `@raystack/frontie
 
 The two apps don't share the same backend ports: client-demo talks to ConnectRPC on `:8002` only, while admin needs **both** `:8000` (gRPC-gateway HTTP API) and `:8002` (ConnectRPC). If your local Frontier setup only runs ConnectRPC, the admin app will partially work — sign-in via mailotp works (it goes through `:8002`) but pages that depend on the HTTP API will fail to load. Surface this clearly before launching admin if `:8000` is not listening.
 
+### Selecting an App
+
+When the user types just `ui` / `open ui` (no app name), ask via `AskUserQuestion`:
+
+```
+question: "Which app would you like to launch?"
+header:   "App"
+multiSelect: false
+options:
+  - label: "client-demo (Recommended)"
+    description: "End-user demo app on `web/apps/client-demo`. Talks to Frontier ConnectRPC on :8002 only. Sign in as any raystack.org user."
+  - label: "admin"
+    description: "Platform admin UI on `web/apps/admin`. Needs Frontier HTTP gateway on :8000 AND ConnectRPC on :8002. Super-admin sign-in only (+sa users)."
+  - label: "Both"
+    description: "Launch both dev servers in parallel and open both tabs."
+  - label: "Cancel"
+    description: "Just show current ui status — don't launch anything."
+```
+
+If the user uses the explicit `client-demo` / `admin` / `open <name>` shorthands, skip this question and go straight to launching that one.
+
 ### UI Prerequisites
 
 Before any UI command, verify these. If anything is missing, **stop and tell the user** — do NOT install Node/pnpm/MCPs silently.
@@ -988,7 +1128,22 @@ ls -d "$WEB_ROOT"/sdk        2>/dev/null
 ls -d "$WEB_ROOT"/packages/* 2>/dev/null
 ```
 
-Match folders by their `package.json` `name` field when names are ambiguous. The current Frontier layout has `apps/admin` (not `admin-app`) — never assume the dashed form. If both folders are not present under `apps/`, surface the detected list and ask the user which is which.
+Match folders by their `package.json` `name` field when names are ambiguous. The current Frontier layout has `apps/admin` (not `admin-app`) — never assume the dashed form. If both expected apps are not present under `apps/`, ask via `AskUserQuestion` with the detected folder list as options:
+
+```
+question: "Which folder is the <client-demo|admin> app?"
+header:   "App folder"
+multiSelect: false
+options:
+  - label: "<detected_folder_1>"
+    description: "package.json name: <name>, dev script: <pnpm script>"
+  - label: "<detected_folder_2>"
+    description: "package.json name: <name>, dev script: <pnpm script>"
+  - label: "Not present — skip this app"
+    description: "Don't launch this app. We'll only set up the other one."
+```
+
+(Pick at most 3 folders to surface. If there are more, summarise and fall back to a free-text prompt for the path.)
 
 Pick the right endpoint env keys per app by reading the existing `.env`/`.env.example`:
 
@@ -1047,7 +1202,22 @@ grep -E '^(FRONTIER_CONNECT_ENDPOINT|VITE_FRONTIER_CONNECT_ENDPOINT)=' <app_path
 Use the `repoint_keys` stored in `.config.json` for that app — never blanket-rewrite every `FRONTIER_*_URL` line. For admin, that defaults to **only** `FRONTIER_CONNECTRPC_URL`. If the user says "repoint both" or names a specific key, honour that.
 
 
-1. If `<url>` is not `localhost` / `127.0.0.1`, apply [Remote Host Protection](#remote-host-protection) — show the exact target and require an explicit confirmation. Even a read-only-looking UI can trigger writes via the SDK.
+1. If `<url>` is not `localhost` / `127.0.0.1`, ask via `AskUserQuestion` (this is a specialisation of [Remote Host Protection](#remote-host-protection)):
+
+   ```
+   question: "Repoint <app> from <current_url> to <new_url>?"
+   header:   "Remote endpoint"
+   multiSelect: false
+   options:
+     - label: "Cancel (Recommended)"
+       description: "Don't rewrite the .env. <new_url> is not localhost — a UI action could mutate prod data."
+     - label: "Proceed — repoint <repoint_keys>"
+       description: "Rewrite the configured keys (<repoint_keys>) only, back up the .env, restart the app."
+     - label: "Proceed and rewrite ALL FRONTIER_*_URL keys"
+       description: "Override the narrower repoint_keys list and rewrite every Frontier endpoint key in the .env. Only do this if you really mean both API and ConnectRPC live at <new_url>."
+   ```
+
+   Even a read-only-looking UI can trigger writes via the SDK.
 2. If `.env` exists, back it up: `cp <app_path>/.env <app_path>/.env.bak.$(date +%s)`. If only `.env.example` exists, copy it to `.env` first.
 3. Read `.env` line-by-line. Replace the existing `FRONTIER_CONNECT_ENDPOINT=` (or `VITE_FRONTIER_CONNECT_ENDPOINT=`) line, preserving all other entries. If the key is absent, append it.
 4. `chmod 600 <app_path>/.env`.
@@ -1190,7 +1360,24 @@ When the user says `ui stop` / `stop ui`, or as part of full `teardown`:
 3. Leave the SDK build output on disk — it's just files.
 4. Do NOT touch the backend (Frontier, SpiceDB, Postgres). UI teardown is independent of backend teardown unless the user explicitly asks for "teardown everything".
 
-If the user says "teardown everything", run UI teardown first, then the [backend Teardown](#teardown) section.
+When the user says **just `teardown`** (no scope) and BOTH the UI and backend are running, disambiguate with `AskUserQuestion`:
+
+```
+question: "What should be stopped?"
+header:   "Teardown scope"
+multiSelect: false
+options:
+  - label: "UI only (Recommended)"
+    description: "Stop client-demo + admin dev servers. Leave Frontier / SpiceDB / Postgres running so you can keep hitting the backend via curl."
+  - label: "Backend only"
+    description: "Stop Frontier (and SpiceDB / Postgres / containers depending on setup_mode). Keep the UI dev servers running — they'll show errors until backend is back."
+  - label: "Everything"
+    description: "Stop UI dev servers AND backend. After this, a future `/frontier-sandbox` invocation will run the full startup flow again."
+  - label: "Cancel"
+    description: "Don't stop anything."
+```
+
+If the user explicitly says `ui stop` / `stop ui` skip this question and only stop the UI. If they explicitly say `stop` / `teardown` and only one layer is running, also skip the question and just stop that layer.
 
 ### Role-Name Mapping
 
@@ -1204,7 +1391,24 @@ Frontier's UI exposes these org-level roles (verified in client-demo invite flow
 | **Organization Viewer** | "read-only", "viewer" |
 | **Billing Manager** | "billing admin" |
 
-There is **no role literally called "Admin"**. When the user says "invite X as org admin", select **Organization Manager** and tell them which one you picked. If they meant Owner, swap. Don't guess silently.
+There is **no role literally called "Admin"**. When the user says "invite X as org admin", confirm the mapping with `AskUserQuestion` instead of guessing:
+
+```
+question: "Frontier has no 'Admin' role. Which one do you mean for <email>?"
+header:   "Role"
+multiSelect: false
+options:
+  - label: "Organization Manager (Recommended)"
+    description: "Closest to admin — full org management. Can invite/remove members, manage projects, settings."
+  - label: "Organization Owner"
+    description: "Highest privilege — full control including org deletion. Usually only the founder."
+  - label: "Organization Access Manager"
+    description: "Can manage member roles and permissions but not org settings."
+  - label: "Organization Viewer"
+    description: "Read-only across the org."
+```
+
+(Billing Manager exists but is a separate scope — not interchangeable with "admin". Don't include it in this picker unless the user explicitly mentions billing.)
 
 Newly-invited members appear in the table as **"Member (Pending invite)"** until they accept — the chosen role only applies post-acceptance. Use this row text in `wait_for` after sending an invite.
 
