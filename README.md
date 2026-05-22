@@ -6,7 +6,9 @@ Claude Code plugins for Raystack services.
 
 ### frontier-sandbox
 
-A Claude Code skill to setup and test [Frontier](https://github.com/raystack/frontier) RPCs locally. It can:
+A Claude Code skill to setup and test [Frontier](https://github.com/raystack/frontier) locally — both the **RPC layer** (ConnectRPC with auto-auth) and the **UI layer** (client-demo + admin-app driven through a real browser).
+
+**Backend / RPC:**
 
 - **Setup Frontier from scratch** — provision PostgreSQL databases, start SpiceDB, build Frontier from source, run migrations, and start the server
 - **Choose Docker or local deps** — defaults to Docker (one PG container with both the `frontier` and `frontier_spicedb` databases + a SpiceDB container, via a provided compose file). Fall back to fully-local install if you prefer
@@ -17,6 +19,13 @@ A Claude Code skill to setup and test [Frontier](https://github.com/raystack/fro
 - **Seed data** — create sample orgs, users, and projects for testing
 - **View logs** — tail Frontier and SpiceDB logs for debugging
 - **Proto-aware RPC discovery** — shows request/response fields and generates ready-to-use curl examples
+
+**UI (new in 2.0):**
+
+- **Drive client-demo and admin-app** through a real browser via [chrome-devtools-mcp](https://github.com/ChromeDevTools/chrome-devtools-mcp) — click buttons, fill forms, navigate, assert on screen state
+- **Build and live-reload the Frontier JS SDK** — `pnpm install && pnpm run build` for the SDK, `pnpm run dev` for each app, with HMR for app source changes and a single `sdk rebuild` command for SDK changes
+- **Manage each app's `.env`** — read `FRONTIER_CONNECT_ENDPOINT`, repoint an app to another deployment (`point client-demo to <url>`) with backup and remote-host confirmation
+- **Real login flow** — drives the mailotp form just like a user, using the same `test_otp` and `+sa` conventions as the RPC flow
 
 ## Installation
 
@@ -63,6 +72,13 @@ Once running, these work at any point in the conversation:
 | `status` | Show running processes, ports, and database info |
 | `teardown` / `stop` | Stop services and optionally drop databases |
 | `list rpcs` / `show rpcs` | List available RPCs with field details |
+| `ui` / `open ui` | List the two web apps with status, pick one to launch |
+| `client-demo` / `open client-demo` | Build SDK (if needed), start client-demo, open in browser |
+| `admin-app` / `open admin-app` | Build SDK (if needed), start admin-app, open in browser |
+| `sdk rebuild` / `rebuild sdk` | Rebuild SDK and refresh any running app tabs |
+| `ui status` | Show PID, port, and `FRONTIER_CONNECT_ENDPOINT` for each app |
+| `ui stop` / `stop ui` | Stop the app dev servers (backend keeps running) |
+| `point client-demo to <url>` | Rewrite that app's `FRONTIER_CONNECT_ENDPOINT` and restart |
 | `reconfigure` | Change server address, OTP, or PostgreSQL settings |
 
 ### Testing RPCs
@@ -76,6 +92,24 @@ Once running, you can ask things like:
 - "Show me all available RPCs in AdminService"
 
 The skill handles authentication automatically using test users on `raystack.org` domain.
+
+### UI Testing
+
+Once you've run the backend (or pointed at an existing one), drive the apps through the browser:
+
+- "open admin-app" — builds SDK, runs `pnpm dev`, opens the URL, drives the super-admin login
+- "open client-demo" — same flow with a regular user
+- "click the Create Organization button and name it acme"
+- "go to Settings → Members and verify alice@raystack.org is listed"
+- "I changed the SDK — sdk rebuild"
+- "point client-demo to https://frontier.staging.example.com" (asks for confirmation since it's non-localhost)
+- "ui status" — show what's running
+
+**UI prerequisites** (the skill checks these on first UI command — it will NOT auto-install):
+
+- [pnpm](https://pnpm.io) and Node.js 20+
+- The [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp) plugin — install with `/plugin install chrome-devtools-mcp` (or equivalent), restart Claude Code
+- The Frontier source cloned to `~/raystack/frontier` (the backend setup flow takes care of this)
 
 ### Test Users
 
@@ -115,5 +149,10 @@ plugins/
       init-db.sql                  # Creates the second DB (frontier_spicedb) on first PG boot
     skills/
       frontier-sandbox/
-        SKILL.md                   # Skill definition
+        SKILL.md                   # Skill definition (RPC + UI flows)
 ```
+
+## Versions
+
+- **2.0.0** — adds UI testing for client-demo and admin-app via chrome-devtools-mcp, with SDK rebuild loop and `.env` endpoint management
+- **1.0.0** — initial release: RPC testing, Docker/local backend setup, auto-auth, seed data

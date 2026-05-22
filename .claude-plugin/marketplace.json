@@ -11,8 +11,8 @@
     {
       "name": "frontier-sandbox",
       "source": "./plugins/frontier-sandbox",
-      "description": "Setup and test Frontier RPCs locally with automatic authentication, database provisioning, and SpiceDB integration",
-      "version": "1.0.0",
+      "description": "Setup and test Frontier locally — ConnectRPC calls with auto-auth, plus UI testing of client-demo and admin-app via chrome-devtools-mcp (button clicks, form fills, live SDK rebuilds)",
+      "version": "2.0.0",
       "author": {
         "name": "Abhishek Sah"
       }

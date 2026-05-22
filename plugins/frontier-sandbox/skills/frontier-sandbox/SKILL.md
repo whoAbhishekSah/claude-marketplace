@@ -1,6 +1,9 @@
 # Frontier Local Testing
 
-Test Frontier RPCs locally using ConnectRPC protocol with automatic authentication.
+Test Frontier locally end-to-end:
+- **RPC layer** — ConnectRPC calls with automatic authentication (built-in).
+- **UI layer** — drive the **client-demo** and **admin-app** web apps via [chrome-devtools-mcp](#ui-testing) (button clicks, form fills, navigation), with live SDK rebuilds.
+
 Optionally includes full setup of Frontier with all dependencies. Dependencies (PostgreSQL + SpiceDB) run in **Docker by default** via a provided compose file; a fully-local install is offered as an alternative. Frontier itself is always built from source.
 
 ## Configuration
@@ -63,6 +66,13 @@ At any point during the conversation, recognize these as quick actions — do NO
 | **status** | [Status Check](#status-check) |
 | **teardown** / **stop** / **cleanup** | [Teardown](#teardown) |
 | **list rpcs** / **show rpcs** | [Finding Available RPCs](#finding-available-rpcs) |
+| **ui** / **open ui** | [UI Testing](#ui-testing) — list apps and pick one |
+| **client-demo** / **open client-demo** | Start client-demo, open in browser ([UI Testing](#ui-testing)) |
+| **admin-app** / **open admin-app** | Start admin-app, open in browser ([UI Testing](#ui-testing)) |
+| **sdk rebuild** / **rebuild sdk** | Rebuild SDK and refresh running apps ([Rebuild Loop](#rebuild-loop-sdk-changes)) |
+| **ui status** | Show ports/PIDs/endpoints for the web apps |
+| **ui stop** / **stop ui** | Stop the app dev servers (leaves backend running) |
+| **point client-demo to &lt;url&gt;** / **point admin-app to &lt;url&gt;** | Update `FRONTIER_CONNECT_ENDPOINT` in that app's `.env`, restart |
 | **reconfigure** | Re-run [First-time Config](#first-time-config) |
 
 ---
@@ -603,6 +613,12 @@ Things to try:
   "status" — check what's running
   "rebuild" — rebuild after code changes
   "teardown" — stop everything
+
+UI testing (see "UI Testing" section):
+  "open client-demo"  / "open admin-app"  — launch in browser
+  "sdk rebuild"       — pick up SDK changes
+  "ui status"         — what's running on the web side
+  "point client-demo to <url>" — repoint an app at a different Frontier
 ```
 
 ### Teardown
@@ -916,3 +932,244 @@ When the user asks about a **specific RPC** or wants to know **what fields to pa
    ```
 
 5. Always generate a ready-to-use curl example with sensible placeholder values based on the field types.
+
+---
+
+## UI Testing
+
+Drive the two Frontier web apps through a real browser so UI engineers can exercise full user flows (button clicks, form fills, navigation, table assertions) without leaving the skill. Both apps live in the frontier monorepo, share a JS SDK, and talk to the same ConnectRPC backend the [RPC flow](#services) already targets.
+
+| App | Purpose | Who can sign in |
+|-----|---------|-----------------|
+| **client-demo** | End-user-facing demo app (sign-in, orgs, projects, settings) | Any logged-in user |
+| **admin-app** | Platform admin UI | Super admins only (`+sa` users in `app.admin.users`) |
+
+Both apps consume the **Frontier JS SDK**. Any SDK source change requires `pnpm run build` in the SDK package before the apps pick it up; app source changes are picked up by Vite HMR automatically.
+
+### UI Prerequisites
+
+Before any UI command, verify these. If anything is missing, **stop and tell the user** — do NOT install Node/pnpm/MCPs silently.
+
+1. **pnpm** — `pnpm --version`. If missing, suggest `corepack enable && corepack prepare pnpm@latest --activate`.
+2. **Node.js >= 20** — `node --version`. If too old, ask the user how they manage Node (nvm/fnm/asdf) and let them upgrade.
+3. **chrome-devtools-mcp tools** — confirm that browser-driving tools (e.g. `mcp__chrome-devtools__*` or equivalent) are listed as available in the current conversation. If they aren't, tell the user:
+   > UI testing needs the chrome-devtools-mcp plugin. Install it (e.g. via `/plugin install chrome-devtools-mcp`) and restart Claude Code, then re-run the UI command.
+   Do not try to script the browser by other means.
+4. **Frontier source cloned** — `~/raystack/frontier` must exist. If not, route the user through [Step 6: Clone and Build Frontier](#step-6-clone-and-build-frontier) first (only the clone step is needed — the Go build is optional for UI-only work).
+
+### Path Discovery (first UI run)
+
+On the first UI command (or if `.config.json` has no `ui` block), discover the web monorepo layout inside `~/raystack/frontier`. Don't hardcode — the layout has changed across Frontier versions.
+
+```bash
+FRONTIER=~/raystack/frontier
+
+# Find the web/JS workspace root (must contain a pnpm-workspace.yaml)
+for candidate in "$FRONTIER/sdks/js" "$FRONTIER/web" "$FRONTIER"; do
+  if [ -f "$candidate/pnpm-workspace.yaml" ]; then
+    echo "WEB_ROOT=$candidate"; break
+  fi
+done
+```
+
+If none of the candidates have `pnpm-workspace.yaml`, ask the user for the absolute path to the web workspace.
+
+From `WEB_ROOT`, locate the two apps and the SDK. Read `pnpm-workspace.yaml` for the glob patterns, then resolve concrete paths:
+
+```bash
+# Apps — usually web/apps/client-demo and web/apps/admin-app, but names can drift
+ls -d "$WEB_ROOT"/apps/*/  2>/dev/null
+# SDK — try common locations
+ls -d "$WEB_ROOT"/sdk        2>/dev/null
+ls -d "$WEB_ROOT"/packages/* 2>/dev/null
+```
+
+Match folders by their `package.json` `name` field when names are ambiguous. If `client-demo` or `admin-app` aren't both present under `apps/`, surface the list of detected app folders and ask the user which is which.
+
+Save under a new `ui` block in `.config.json`:
+```json
+{
+  "ui": {
+    "web_root": "/Users/<you>/raystack/frontier/sdks/js",
+    "sdk_path": "/Users/<you>/raystack/frontier/sdks/js/sdk",
+    "sdk_source_git_hash": null,
+    "apps": {
+      "client-demo": {
+        "path": "/Users/<you>/raystack/frontier/sdks/js/apps/client-demo",
+        "default_endpoint": "http://localhost:8002",
+        "pid": null,
+        "actual_port": null
+      },
+      "admin-app": {
+        "path": "/Users/<you>/raystack/frontier/sdks/js/apps/admin-app",
+        "default_endpoint": "http://localhost:8002",
+        "pid": null,
+        "actual_port": null
+      }
+    }
+  }
+}
+```
+
+Apply `chmod 600 ~/frontier-test/.config.json` after writing (per [File Permissions](#file-permissions)).
+
+### Reading and Writing App `.env`
+
+Each app has a `.env` (or `.env.local`) in its directory. The key the skill cares about is `FRONTIER_CONNECT_ENDPOINT` — it tells the app which Frontier backend to call.
+
+**Reading** — show only this key, never the full file:
+```bash
+grep -E '^(FRONTIER_CONNECT_ENDPOINT|VITE_FRONTIER_CONNECT_ENDPOINT)=' <app_path>/.env 2>/dev/null
+```
+(Vite-style apps usually use a `VITE_` prefix. Check the app's `vite.config.*` or existing `.env.example` for the actual key name and store it under `ui.apps.<name>.endpoint_env_key`.)
+
+**Default** — when the user hasn't customised: `FRONTIER_CONNECT_ENDPOINT='http://localhost:8002'` (matches the local Frontier from [Step 8](#step-8-start-frontier-in-background)).
+
+**Writing** — when the user says `point client-demo to <url>` (or `admin-app`):
+1. If `<url>` is not `localhost` / `127.0.0.1`, apply [Remote Host Protection](#remote-host-protection) — show the exact target and require an explicit confirmation. Even a read-only-looking UI can trigger writes via the SDK.
+2. If `.env` exists, back it up: `cp <app_path>/.env <app_path>/.env.bak.$(date +%s)`. If only `.env.example` exists, copy it to `.env` first.
+3. Read `.env` line-by-line. Replace the existing `FRONTIER_CONNECT_ENDPOINT=` (or `VITE_FRONTIER_CONNECT_ENDPOINT=`) line, preserving all other entries. If the key is absent, append it.
+4. `chmod 600 <app_path>/.env`.
+5. If the app is currently running (PID alive), restart it (kill + relaunch) so the new endpoint is picked up — Vite reads `.env` at startup, not on change.
+
+Never echo `.env` contents in full — they may contain other secrets (analytics keys, client IDs, etc.). Show only the line you changed, masking values that look secret.
+
+### Build the SDK
+
+The SDK must be built before either app is launched for the first time. Build cache: skip if the SDK source git hash hasn't changed AND a build output directory exists.
+
+```bash
+SDK_HASH=$(cd <sdk_path> && git rev-parse HEAD)
+# Compare with `ui.sdk_source_git_hash` in .config.json
+# Also check that <sdk_path>/dist (or whatever "main"/"exports" points at in package.json) exists
+```
+
+If a rebuild is needed:
+
+```bash
+cd <sdk_path>
+[ -f pnpm-lock.yaml ] && pnpm install --frozen-lockfile || pnpm install
+pnpm run build
+```
+
+After a successful build, update `ui.sdk_source_git_hash` in `.config.json` to the new `SDK_HASH`.
+
+If `pnpm run build` exits non-zero: show the last 30 lines of stderr, tell the user the SDK didn't build, **stop** — do not start any app on a broken SDK.
+
+If the SDK package doesn't define a `build` script, look at `package.json` for the actual script name (`build:lib`, `prepublishOnly`, etc.) and use that; save the resolved name under `ui.sdk_build_script` for next time.
+
+### Start an App in the Background
+
+For client-demo or admin-app:
+
+```bash
+APP_DIR=<app_path>
+cd "$APP_DIR"
+[ -f pnpm-lock.yaml ] && pnpm install --frozen-lockfile || pnpm install
+pnpm run dev > "$APP_DIR/.dev.log" 2>&1 &
+echo $! > "$APP_DIR/.dev.pid"
+chmod 600 "$APP_DIR/.dev.log" "$APP_DIR/.dev.pid"
+```
+
+Save the PID under `ui.apps.<name>.pid` in `.config.json`.
+
+**Detect the bound port.** Vite picks a free port if the default is taken, so don't assume `5173`/`5174`. Tail the log until a URL appears (apply [Health Check Timeout](#health-check-timeout) — 30s cap):
+
+```bash
+# Poll the log up to 30s
+for i in $(seq 1 30); do
+  URL=$(grep -Eo 'http://localhost:[0-9]+' "$APP_DIR/.dev.log" | head -1)
+  [ -n "$URL" ] && break
+  sleep 1
+done
+```
+
+Store the URL/port under `ui.apps.<name>.actual_port`. If no URL appears in 30s, show `tail -50 .dev.log` and ask the user whether to retry, debug, or stop.
+
+**Port conflict** with the backend Frontier port (`8002` from Step 8): if Vite somehow grabs that port, refuse and ask the user — never let an app collide with Frontier.
+
+### Open in Browser via chrome-devtools-mcp
+
+Once the URL is known, drive the browser with the chrome-devtools-mcp tools available in the session. The exact tool names depend on the installed MCP — discover them at use time, don't hardcode here. Typical capabilities to use:
+
+| Intent | Use |
+|--------|-----|
+| Open the app | A "navigate" / "new page" tool with the URL from `actual_port` |
+| Find/click a button | A "snapshot" or "query" tool to locate the element by visible text / role / `data-testid`, then a "click" tool |
+| Fill a form | A "type" / "fill" tool keyed by label or `data-testid` |
+| Read state | A "snapshot" / "get text" tool to verify what's on screen |
+| Capture failure | A "screenshot" tool, saved to `~/frontier-test/ui-screenshots/<timestamp>.png` (`mkdir -p` first, `chmod 600`) |
+
+Selector strategy, in priority order:
+1. Visible label / role / accessible name (most stable across refactors)
+2. `data-testid` if present
+3. CSS selector or `nth-of-type` only as a last resort, and warn the user that the selector is fragile
+
+After each meaningful action, take a follow-up snapshot and tell the user **what changed** in one sentence, not a dump of the DOM.
+
+### Driving the Login Flow
+
+Both apps use the mailotp flow that the [Automatic Login](#automatic-login-mailotp-flow) section already documents. In the UI:
+
+1. Use the configured `test_otp` and `test_domain` (`raystack.org`) from `.config.json` — same source of truth as the RPC flow.
+2. For **admin-app**, the email must be a super admin (`+sa` variant). If the user doesn't specify one, default to `admin1+sa@raystack.org`.
+3. For **client-demo**, any `raystack.org` email works; default to `user1@raystack.org` if unspecified.
+4. Drive the form: type email → click "Send OTP" (or whatever the button reads) → type `test_otp` → click "Verify" (or equivalent). Re-check the DOM after each step — don't blast all clicks before the next view renders.
+5. If login fails (wrong email domain, backend down, OTP rejected), surface the on-screen error message verbatim. Don't retry silently more than once.
+
+The skill must NOT bypass the UI to forge a cookie — the point of UI testing is exercising the real flow. If the user explicitly says "skip the login UI", do the [Automatic Login](#automatic-login-mailotp-flow) curl flow, drop the `sid` cookie into the browser via a chrome-devtools-mcp cookie tool, and reload.
+
+### Rebuild Loop (SDK changes)
+
+When the user says `sdk rebuild`, `rebuild sdk`, or "I changed the SDK":
+
+1. Run [Build the SDK](#build-the-sdk) (respecting the build cache).
+2. If the build fails, **stop** — leave running apps alone. The user can fix and retry.
+3. If the build succeeds, for each app whose PID is alive:
+   - Try a soft refresh first: use the chrome-devtools-mcp reload/navigate tool on the open tab. With Vite + workspace deps, HMR usually picks up the new SDK without a dev-server restart.
+   - If the page console shows the old SDK is still loaded (e.g. the user reports stale behaviour), then hard-restart the dev server: graceful-kill the PID, relaunch via [Start an App in the Background](#start-an-app-in-the-background), refresh the browser tab.
+4. Tell the user which path was taken (soft reload vs full restart).
+
+For pure app source changes (no SDK touched), HMR handles it — no action needed unless the user reports HMR is broken.
+
+### UI Status
+
+When the user says `ui status`:
+
+For each entry in `ui.apps`:
+- **Running?** Apply [Stale PID Detection](#stale-pid-detection) on the stored PID (process name should contain `node` or `pnpm` or the app slug). Clear the PID if stale.
+- **Port** — from `actual_port`. Verify with `lsof -i :<port> -sTCP:LISTEN`.
+- **Endpoint** — read `FRONTIER_CONNECT_ENDPOINT` (or `VITE_…`) from the app's `.env`. Show only the value, no other env lines.
+
+For the SDK:
+- Show `sdk_source_git_hash` (short form) and whether the build output exists.
+- If the current `git rev-parse HEAD` in the SDK differs from the stored hash, flag it: `SDK source has changed since last build — run "sdk rebuild" to pick it up.`
+
+Format the output as a compact table, e.g.:
+```
+App           PID    Port   Endpoint                  Browser
+client-demo   12345  5173   http://localhost:8002     open
+admin-app     —      —      http://localhost:8002     —
+
+SDK build:    commit a1b2c3d (matches HEAD)
+```
+
+### UI Teardown
+
+When the user says `ui stop` / `stop ui`, or as part of full `teardown`:
+
+1. For each app with a stored PID, apply [Graceful Shutdown](#graceful-shutdown) and [Stale PID Detection](#stale-pid-detection). Kill the dev server, wait for the port to free.
+2. Clear `pid` and `actual_port` in `.config.json`; keep `path` and `endpoint_env_key`.
+3. Leave the SDK build output on disk — it's just files.
+4. Do NOT touch the backend (Frontier, SpiceDB, Postgres). UI teardown is independent of backend teardown unless the user explicitly asks for "teardown everything".
+
+If the user says "teardown everything", run UI teardown first, then the [backend Teardown](#teardown) section.
+
+### Safety Recap for UI
+
+The general [Safety Rules](#safety-rules) all apply. Specifically for UI work:
+
+- **Remote endpoint** — pointing an app at a non-localhost `FRONTIER_CONNECT_ENDPOINT` requires explicit confirmation. A UI action can mutate prod data faster than a typoed curl.
+- **No screenshots of secrets** — if the page being captured shows a token, API key, or other sensitive value, mask it or skip the screenshot. Screenshots land in `~/frontier-test/ui-screenshots/` with `chmod 600`.
+- **No silent .env rewrites** — back up the file, change one line, show the diff.
+- **PID identity** — Vite dev servers are `node` processes; confirm via `ps -p <PID> -o command=` that the command line includes the app path before killing.
