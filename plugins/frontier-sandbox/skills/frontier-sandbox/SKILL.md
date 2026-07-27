@@ -3,6 +3,7 @@
 Test Frontier locally end-to-end:
 - **RPC layer** — ConnectRPC calls with automatic authentication (built-in).
 - **UI layer** — drive the **client-demo** and **admin** web apps via [chrome-devtools-mcp](#ui-testing) (button clicks, form fills, navigation), with live SDK rebuilds.
+- **GitOps layer** — manage platform users (superadmins), permissions, roles, preferences, and webhooks from a desired-state file with [`frontier reconcile`](#gitops-reconcile). Always dry-run first, show the plan, then ask before applying.
 
 Optionally includes full setup of Frontier with all dependencies. Dependencies (PostgreSQL + SpiceDB) run in **Docker by default** via a provided compose file; a fully-local install is offered as an alternative. Frontier itself is always built from source.
 
@@ -15,6 +16,8 @@ Optionally includes full setup of Frontier with all dependencies. Dependencies (
 - **Config Store**: `~/frontier-test/.config.json`
 - **Generated Frontier Config**: `~/frontier-test/config.yaml`
 - **Sample Config Template**: `plugins/frontier-sandbox/config/sample.config.yaml` (in this repo)
+- **Sample Desired-State File**: `plugins/frontier-sandbox/config/sample.platform-users.yaml` (in this repo)
+- **Desired-State File (user's)**: path stored in `.config.json` under `reconcile_file` — asked once, reused after ([GitOps: reconcile](#gitops-reconcile))
 - **Docker Compose File**: `plugins/frontier-sandbox/config/docker-compose.yaml` (in this repo — runs one PG container holding both `frontier` and `frontier_spicedb` DBs, plus a SpiceDB container)
 
 ---
@@ -94,6 +97,12 @@ At any point during the conversation, recognize these as quick actions — do NO
 | **rebuild** / **restart** | [Rebuild & Restart](#rebuild--restart) |
 | **logs** / **debug** | [Log Tailing](#log-tailing) |
 | **seed** / **populate** | [Seed Data](#seed-data) |
+| **reconcile** / **gitops** | [GitOps: reconcile](#gitops-reconcile) — dry run, show plan, ask to apply |
+| **dry run** / **plan** | [GitOps: reconcile](#gitops-reconcile), stop after the plan |
+| **apply** | [GitOps: reconcile](#gitops-reconcile), skip straight to the apply run (still shows the plan first) |
+| **export &lt;kind&gt;** | [Export](#export-seed-a-file-from-the-server) — print live state as a desired-state file |
+| **add superadmin &lt;email&gt;** / **make me superadmin** | [Adding a Superadmin](#adding-a-superadmin) |
+| **reconcile file** / **change reconcile file** | Re-ask for the desired-state file path and update `reconcile_file` in `.config.json` |
 | **status** | [Status Check](#status-check) |
 | **teardown** / **stop** / **cleanup** | [Teardown](#teardown) |
 | **list rpcs** / **show rpcs** | [Finding Available RPCs](#finding-available-rpcs) |
@@ -128,6 +137,17 @@ Save to `.config.json`:
 ```
 
 On subsequent runs, silently load the config. If the user wants to change settings, they can ask to reconfigure.
+
+### Keys the GitOps flow adds
+
+Two more keys get written the first time the user runs a reconcile. Do NOT ask for them during first-time config — they are collected on demand.
+
+| Key | What it is | Set by |
+|---|---|---|
+| `reconcile_file` | Absolute path to the user's desired-state YAML file | Asked once in [GitOps: reconcile](#gitops-reconcile), reused every run after |
+| `bootstrap_client_id` / `bootstrap_client_secret` | The boot-seeded superuser service account from `app.admin.bootstrap` in `config.yaml` | Generated in [Step 5](#step-5-generate-frontier-configyaml), or read back from an existing `config.yaml` |
+
+Both are secrets-adjacent, so `chmod 600 ~/frontier-test/.config.json` after writing (per [File Permissions](#file-permissions)), and never echo the client secret.
 
 ---
 
@@ -631,8 +651,14 @@ Replace the placeholders with actual values:
 - `<PG_PORT>` — from `.config.json`
 - `<FRONTIER_DB>` — e.g., `frontier_a3f1` (local) or `frontier` (docker)
 - `<SPICEDB_PORT>` — from `.config.json`
+- `<BOOTSTRAP_CLIENT_ID>` — generate a UUID: `uuidgen | tr 'A-Z' 'a-z'` (the server rejects a non-UUID here)
+- `<BOOTSTRAP_CLIENT_SECRET>` — generate a random 64-char hex string: `openssl rand -hex 32`
 
 Do NOT hardcode the secret keys. Generate fresh ones each setup.
+
+**Save the bootstrap pair.** Write `bootstrap_client_id` and `bootstrap_client_secret` into `.config.json` right after generating them. Every `frontier reconcile` and `frontier export` run needs them ([GitOps: reconcile](#gitops-reconcile)). If `config.yaml` already exists and has an `app.admin.bootstrap` block, read the pair back out of it instead of generating a new one — changing the secret rotates the credential on the next boot.
+
+**There is no `app.admin.users` list anymore.** The server dropped it (RFC 0001). If a config template still has one, delete it — leaving it in does nothing and misleads the next reader. Superadmins now come only from the bootstrap service account plus whatever the reconcile file grants.
 
 ### Step 6: Clone and Build Frontier
 
@@ -683,6 +709,27 @@ curl -s http://localhost:8002/raystack.frontier.v1beta1.FrontierService/ListUser
 
 If it returns a response (even an auth error), the server is running.
 
+### Step 9: Create the First Superadmins
+
+A fresh server has exactly one superuser: the bootstrap service account. No human email is a superadmin until a reconcile run makes one — the `+sa` suffix by itself grants nothing now.
+
+Ask via `AskUserQuestion`:
+
+```
+question: "No human superadmin exists yet. Create one now?"
+header:   "Superadmin"
+multiSelect: false
+options:
+  - label: "Yes — use the sample file (Recommended)"
+    description: "Copy plugins/frontier-sandbox/config/sample.platform-users.yaml to ~/frontier-test/platform-users.yaml and reconcile it. Grants admin1+sa@raystack.org and admin2+sa@raystack.org."
+  - label: "Yes — I have my own file"
+    description: "Point me at an existing desired-state YAML file and reconcile that instead."
+  - label: "Skip for now"
+    description: "Leave the bootstrap service account as the only superuser. AdminService calls will need Basic auth until you run a reconcile."
+```
+
+Then run [GitOps: reconcile](#gitops-reconcile) with the chosen file. Store the path under `reconcile_file`.
+
 ### Setup Complete — Quick Reference
 
 After all steps succeed, print this summary. The SpiceDB line reads "(docker)" or "(PID ...)" depending on mode:
@@ -699,6 +746,9 @@ Frontier is ready!  [setup_mode: <docker|local>]
 Things to try:
   "list all users as admin"
   "create an org called my-org"
+  "reconcile" — dry-run the desired-state file, then apply it
+  "export platformuser" — dump current superadmins as a file
+  "add superadmin me+sa@raystack.org"
   "seed" — create sample orgs, users, and projects
   "show me available RPCs"
   "logs" — view server logs
@@ -828,7 +878,7 @@ When the user asks about a specific error or failed RPC:
 When the user asks to **seed**, **populate**, or wants **sample data** to work with, create a standard test environment using RPC calls:
 
 **Step 1: Authenticate as superadmin**
-Login as `admin1+sa@raystack.org` using the auto-login flow.
+Login as a reconciled platform admin (e.g. `admin1+sa@raystack.org`) using the auto-login flow. If that email is not in the reconcile file yet, it has no AdminService access — run [Adding a Superadmin](#adding-a-superadmin) first, or fall back to [Bootstrap Service Account Auth](#bootstrap-service-account-auth).
 
 **Step 2: Create test organizations**
 ```bash
@@ -946,7 +996,7 @@ Extract the `sid=` value from the `Set-Cookie` response header. Store it in the 
 Emails on `raystack.org` use the hardcoded OTP. No database access needed.
 
 - `user1@raystack.org` / `user2@raystack.org` / etc. — regular users
-- `user1+sa@raystack.org` — super admin variant
+- `user1+sa@raystack.org` — the naming convention for an intended super admin. It only *is* one after a reconcile run grants it `relation: admin` (see [Super Admin vs Org Admin](#super-admin-vs-org-admin)).
 
 **Only raystack.org users are supported for auto-login.** For real users, provide a cookie manually.
 
@@ -954,24 +1004,54 @@ Emails on `raystack.org` use the hardcoded OTP. No database access needed.
 
 There are two kinds of "admin" in Frontier — don't confuse them:
 
-- **Super admin** (platform-level): Listed in `app.admin.users` in config.yaml. Has access to both FrontierService and AdminService. Created by adding `+sa` alias to the email (e.g., `admin1+sa@raystack.org`).
+- **Super admin** (platform-level): Granted by a `PlatformUser` entry with `relation: admin`. Has access to both FrontierService and AdminService.
 - **Org admin** (org-level): A regular user who has been granted an admin/owner role within a specific organization. Can manage that org via FrontierService but has NO AdminService access.
 
-To get a super admin session, add `+sa` alias to the email:
-- Regular user: `user@raystack.org`
-- Super admin: `user+sa@raystack.org`
+#### How super admins are made now (this changed)
+
+Older versions promoted every email in `app.admin.users` in `config.yaml` at boot. **That is gone.** The server no longer reads that key. Two things replaced it:
+
+1. **The bootstrap service account** — `app.admin.bootstrap` in `config.yaml`. One service account, seeded at every boot, always a superuser. It exists so automation has somewhere to start. It authenticates with Basic auth, not a cookie.
+2. **The `PlatformUser` kind** — every other superadmin (human or service) comes from a desired-state file applied with `frontier reconcile`. See [GitOps: reconcile](#gitops-reconcile).
+
+Practical consequences for this skill:
+
+- **The `+sa` suffix is now just a naming convention.** `admin1+sa@raystack.org` is an ordinary user until a reconcile run grants it `relation: admin`. Logging in with a `+sa` email does NOT give AdminService access on its own.
+- **A fresh server has no human superadmin.** If an AdminService call fails with a permission error, the first thing to check is whether that email is in the reconcile file.
+- If the user says "log in as super admin" and no reconciled admin exists yet, offer [Adding a Superadmin](#adding-a-superadmin) rather than just picking a `+sa` email and hoping.
 
 ### Cookie Rules
 
-| Cookie Type | FrontierService | AdminService |
+| Credential | FrontierService | AdminService |
 |-------------|-----------------|--------------|
-| Super admin cookie (`+sa` email) | Yes | Yes |
-| Regular user cookie | Yes | No |
+| Cookie for a user with `relation: admin` in the reconcile file | Yes | Yes |
+| Cookie for any other user (including an unreconciled `+sa` email) | Yes | No |
+| Basic auth with the bootstrap service account | Yes | Yes |
 
-- **Super admin** = users listed in `app.admin.users` in config.yaml (e.g., `admin1+sa@raystack.org`). These are platform-level admins with access to AdminService.
-- **Org admin** = users who have the admin/owner role within a specific organization. They can manage that org via FrontierService but do NOT have AdminService access.
-- AdminService requests require a **super admin** cookie (`+sa` email)
-- If the user asks to call AdminService without specifying a super admin email, ask for one
+- AdminService requests need a **platform admin**. That is either a reconciled `PlatformUser` cookie or the bootstrap service account's Basic auth header.
+- If the user asks to call AdminService without saying who to act as, ask. Offer the reconciled admins from `reconcile_file` as the options.
+- The cookie store and the mailotp auto-login flow are unchanged — they still work exactly as documented above. Only *who counts as a superadmin* changed.
+
+### Bootstrap Service Account Auth
+
+The bootstrap account uses HTTP Basic auth, not a session cookie. Build the header from `.config.json`:
+
+```bash
+BASIC=$(printf '%s:%s' "<bootstrap_client_id>" "<bootstrap_client_secret>" | base64)
+```
+
+Use it in a curl call:
+```bash
+curl -s -X POST "http://<SERVER>/raystack.frontier.v1beta1.AdminService/<RPC_NAME>" \
+  -H "connect-protocol-version: 1" \
+  -H "content-type: application/json" \
+  -H "Authorization: Basic ${BASIC}" \
+  -d '<JSON_BODY>'
+```
+
+Never print `$BASIC` or the client secret — it is a permanent superuser credential, not a session token. Mask it as `Basic ***` in anything you show the user (per [Never Log Secrets](#never-log-secrets)).
+
+Prefer a reconciled human cookie for day-to-day testing. Use the bootstrap account when there is no human superadmin yet, or for the reconcile and export commands themselves.
 
 ## Usage
 
@@ -1054,6 +1134,279 @@ When the user asks about a **specific RPC** or wants to know **what fields to pa
 
 ---
 
+## GitOps: reconcile
+
+Frontier manages platform-level resources from a file instead of one-off API calls. You write down what should exist, `frontier reconcile` compares the file with the running server, prints a plan, and applies the difference through the admin API. This is the flow described in [RFC 0001](https://github.com/raystack/frontier/blob/main/docs/rfcs/0001-declarative-reconcile.md).
+
+It runs against the **local running server** — the same one from [Step 8](#step-8-start-frontier-in-background). It is a client, so the server does not need a restart.
+
+### The five kinds
+
+| Kind | Spec fields | Identity | Entry left out of the file | How to remove |
+|---|---|---|---|---|
+| `PlatformUser` | `type`, `ref`, `relation` | principal + relation | access is removed | leave the entry out |
+| `Permission` | `namespace`, `name`, `delete` | namespace + name | **plan fails** | `delete: true` |
+| `Role` (custom) | `name`, `title`, `description`, `permissions`, `scopes`, `delete` | name | **plan fails** | `delete: true` |
+| `Role` (predefined) | same | name | resets to the shipped definition | cannot be removed |
+| `Preference` | `name`, `value` | trait name | resets to the trait default | leave the entry out |
+| `Webhook` | `url`, `description`, `subscribed_events`, `state`, `delete` | URL | **plan fails** | `delete: true` |
+
+Two behaviours to explain to the user when a plan surprises them:
+
+- **Objects** (Permission, Webhook, custom Role) are things reconcile creates and deletes. Every one on the server must appear in the file. One that is missing **fails the plan** — it is not silently deleted, and it is not silently ignored.
+- **Values** (PlatformUser, Preference, predefined Role) always exist and have a default. Leaving one out resets it to the default. For `PlatformUser` that means **the file is the full access list** — an admin you forget to list loses admin.
+
+One field rule everywhere: a field you write is the whole value, a field you leave out takes the default, an empty field (`""` or `[]`) means empty. Nothing merges.
+
+### File format
+
+One or more YAML documents, separated by `---`. Each has a `kind` and a `spec`:
+
+```yaml
+apiVersion: v1
+kind: PlatformUser
+spec:
+  - type: user
+    ref: alice@raystack.org
+    relation: admin
+---
+apiVersion: v1
+kind: Permission
+spec:
+  - namespace: compute/order
+    name: get
+```
+
+- `apiVersion` may be left out — it reads as `v1`. Any other value is rejected.
+- A document with content but no `kind`, or with no `spec`, is rejected. To mean an empty list, write `spec: []` on purpose.
+- In one file, a kind must come after the kinds it depends on. `Role` references `Permission`, so `Permission` documents go first.
+- The whole file is checked before anything is applied.
+
+### Getting the file path
+
+Do NOT guess or scan for the file. Ask once, then remember it.
+
+**On every reconcile, read `.config.json` first.** Two shapes are supported. Check for both:
+
+- **`reconcile_file`** — a single path. The simple case: one file, possibly holding several documents.
+- **`reconcile`** — a block, for the layout where each kind lives in its own file. Shape:
+
+  ```json
+  {
+    "reconcile": {
+      "config_dir": "/abs/path/to/config/dir",
+      "files": {
+        "Permission":   "/abs/.../permissions.yaml",
+        "Role":         "/abs/.../roles.yaml",
+        "PlatformUser": "/abs/.../platform_users.yaml",
+        "Preference":   "/abs/.../preferences.yaml"
+      },
+      "apply_order": ["Permission", "Role", "PlatformUser", "Preference"],
+      "needs_render": ["Preference"],
+      "host": "http://localhost:8002",
+      "bootstrap_creds_from": "/abs/path/to/frontier/config.yaml -> app.admin.bootstrap"
+    }
+  }
+  ```
+
+Then:
+
+- **A stored entry exists and the files are there** → use it. Say which, in one line: `Using desired-state files from <config_dir>`.
+- **A stored entry exists but a file is gone** → say which one, and ask again. Do not silently fall back to another file, and do not go hunting for a moved copy.
+- **Nothing stored** → ask with a plain text prompt (free-form, so no `AskUserQuestion`):
+
+  > Where are your desired-state files? Give me an absolute path — a single YAML file, or a directory holding one file per kind. (Or say "sample" to copy the plugin's `sample.platform-users.yaml` into `~/frontier-test/platform-users.yaml`.)
+
+**If the answer is a directory**, list it and work out the layout yourself:
+
+```bash
+ls -1 <dir>
+```
+
+Match files to kinds by name: `*platform_users*` / `*platformuser*` → `PlatformUser`, `*permission*` → `Permission`, `*role*` → `Role`, `*preference*` → `Preference`, `*webhook*` → `Webhook`. Confirm each guess by reading the `kind:` line inside the file — the filename is a hint, the `kind:` field is the answer. Build the `reconcile` block from what you find, write it to `.config.json`, and `chmod 600` the file.
+
+If a directory holds several files that map to the same kind, do not guess. List them and ask which one to use.
+
+**Then ask which kinds to run.** Use `AskUserQuestion` with `multiSelect: true`, one option per kind found. Do not assume "all" — a `PlatformUser` file is authoritative and deserves its own decision.
+
+**Save whatever the user picked** and reuse it in this and future sessions. Only re-ask when the user says **reconcile file** / **change reconcile file**, or a saved path has gone missing.
+
+If the user names a file inline (`reconcile ~/other.yaml`), use it for this run and ask whether to make it the default:
+
+```
+question: "Save <path> as the default reconcile file?"
+header:   "Default file"
+multiSelect: false
+options:
+  - label: "Yes — make it the default (Recommended)"
+    description: "Write it to .config.json. Future 'reconcile' commands use this file without asking."
+  - label: "No — just this once"
+    description: "Use it for this run only. Keep the saved default as it is."
+```
+
+### Rendering templated files
+
+A file with a `.ctmpl` extension, or one containing `{{`, is a [consul-template](https://github.com/hashicorp/consul-template) source, not finished YAML. Check before running:
+
+```bash
+grep -c '{{' <file>
+```
+
+If the count is zero, use the file as-is. If not, do NOT feed it to `reconcile` — the raw template text would be treated as the desired value and would plan a bogus change. Two cases:
+
+1. **Escaped braces only** — the file is plain YAML that carries `{{...}}` placeholders through to the server (Frontier's invite-mail body does this). They appear as `{{ "{{" }}.UserID{{ "}}" }}`. Render them with a copy, never in place:
+   ```bash
+   sed -e 's/{{ "{{" }}/{{/g' -e 's/{{ "}}" }}/}}/g' <file> > <scratchpad>/<kind>.yaml
+   ```
+2. **Real template directives** — anything with `{{ with secret ... }}`, `{{ .Data... }}`, or an `{{ if }}`. These need secrets this skill does not have. Stop and tell the user the file must be rendered by their own tooling first, and ask for the rendered path. Do not guess at values.
+
+Always render into the scratchpad, never over the user's file. After rendering, confirm no markers are left (`grep -c '{{ "'` returns 0) and that the YAML parses, then reconcile the rendered copy. Record which kinds needed rendering under `needs_render` in `.config.json` so later runs know to do it again.
+
+### Running several files in one go
+
+When the layout is one file per kind, run one `reconcile` per file rather than concatenating them. Order matters: **Permission → Role → PlatformUser → Preference**. `Role` entries reference permissions by name, so permissions must exist first.
+
+Dry-run every selected kind before applying any of them. Show all the plans together, then ask once. Applying kind by kind while plans for later kinds are still unknown hides the full blast radius.
+
+### Building the command
+
+The CLI is the Frontier binary already built in [Step 6](#step-6-clone-and-build-frontier): `~/frontier-test/frontier`.
+
+```bash
+BASIC=$(printf '%s:%s' "<bootstrap_client_id>" "<bootstrap_client_secret>" | base64)
+
+~/frontier-test/frontier reconcile \
+  -f "<reconcile_file>" \
+  --host "http://<SERVER>" \
+  -H "Authorization:Basic ${BASIC}" \
+  --dry-run
+```
+
+Flag details that bite:
+
+- **`--host` needs the scheme.** Without `http://` the CLI prepends `https://` and the call fails against a local server. Always pass `http://localhost:8002` (or whatever `server` is in `.config.json`), never a bare `localhost:8002`.
+- **`-H` takes one `key:value` string**, split at the first colon. So the value is `Authorization:Basic <base64>` — one argument, no space after the colon.
+- **`-f` is required.** `--dry-run` is the only thing standing between a plan and a real change.
+- Auth can also be a session cookie — `-H "Cookie:sid=<token>"` for a reconciled platform admin. Basic auth with the bootstrap account is the safer default because it never expires and works on a fresh server. Fall back to the cookie only if the bootstrap pair is missing from `.config.json`.
+- Never let the base64 credential appear in output. When you show the user the command, print it with `-H "Authorization:Basic ***"`.
+
+**If the bootstrap pair is not in `.config.json`,** read it back out of the server's own `config.yaml` instead of asking the user to paste a secret. Keep it in shell variables so it never reaches the transcript:
+
+```bash
+CFG=~/frontier-test/config.yaml   # or the config the running server was started with
+CID=$(awk '/^ *bootstrap:/{f=1} f&&/client_id:/{gsub(/.*client_id: *"?|"$/,"");print;exit}' "$CFG")
+CSEC=$(awk '/^ *bootstrap:/{f=1} f&&/client_secret:/{gsub(/.*client_secret: *"?|"$/,"");print;exit}' "$CFG")
+BASIC=$(printf '%s:%s' "$CID" "$CSEC" | base64 | tr -d '\n')
+```
+
+`tr -d '\n'` matters — some `base64` builds wrap long lines, and a newline inside a header value breaks the request. Print at most `client_id: $CID   secret: *** (len ${#CSEC})` so the user can see it was found without the secret leaking. Then offer to save the pair to `.config.json` so the next run skips this step.
+
+### The reconcile flow
+
+Always dry run first. Every time — even when the user types **apply**.
+
+**1. Dry run.** Run the command above with `--dry-run`.
+
+**2. Show the plan verbatim.** The output is one block per kind:
+
+```
+PlatformUser (planned 2):
+  - add user alice@raystack.org as admin
+  - remove user bob@raystack.org (admin)
+Permission: no changes
+```
+
+Print it exactly as the CLI produced it. Do not summarise it away, and do not reorder it. Then add a short plain-English read underneath, and call out anything risky:
+
+- Any `remove` / `delete` line — name who or what loses access.
+- A `PlatformUser` plan that removes the user's own account, or removes the last admin.
+- A plan that fails (for example, a permission on the server that is not in the file) — show the error and stop. There is nothing to apply.
+
+**3. Ask before applying.** Use `AskUserQuestion`:
+
+```
+question: "Apply this plan to <SERVER>? (<N> changes, <M> removals)"
+header:   "Apply plan"
+multiSelect: false
+options:
+  - label: "Cancel (Recommended)"
+    description: "Don't touch the server. The dry run already showed you the diff — re-run once you've edited the file."
+  - label: "Apply"
+    description: "Run the same command without --dry-run. Adds and updates go first, then deletes. There is no rollback."
+```
+
+Put "Cancel" first. Two exceptions to the recommended label: if the plan has zero changes, say so and skip the question entirely. If the plan has no removals and the user explicitly typed **apply**, you may mark "Apply" as recommended instead.
+
+If `<SERVER>` is not localhost, this is also a [Remote Host Protection](#remote-host-protection) case — use that stricter wording.
+
+**4. Apply.** Re-run the exact same command with `--dry-run` dropped. Nothing else changes.
+
+**5. Report.** Show the output, which now reads `applied N` instead of `planned N`. Then say in one line what changed.
+
+**Read `applied N`, not the list.** On a failed run the CLI still prints the whole plan, then the error at the bottom. The list is what it *intended* to do, not what it did. `PlatformUser (applied 0)` followed by 51 lines means **nothing happened** — do not report those 51 lines as changes. Always quote the `applied N` count, and when N is 0 say plainly that the server is unchanged.
+
+If a call fails partway: there is no rollback, and the loop stops at the first error (`platformuser_reconciler.go`, the apply loop). Adds and updates run before deletes, so a half-finished run has left *more* access, not less — a failing add means no removal ever ran. Tell the user the error, and that the fix is always the same: fix the cause and reconcile again. Whatever already applied will plan no change the second time.
+
+**Then verify, don't assume.** After any apply, re-read the live state and compare it against what you claimed. For `PlatformUser` that is one call:
+
+```bash
+curl -s -X POST "http://<SERVER>/raystack.frontier.v1beta1.AdminService/ListPlatformUsers" \
+  -H "connect-protocol-version: 1" -H "content-type: application/json" \
+  -H "Authorization: Basic ${BASIC}" -d '{}'
+```
+
+Counts before and after are enough. This is the only way to tell a real apply from a plan that printed and died.
+
+**Resolve ids to names in any plan you show.** The plan prints removals by uuid (`remove user d4aca6d7-…`), which tells the user nothing about who loses access. Before asking to apply, call `ListPlatformUsers`, build an id→email map, and list the affected people by email. Also say who is **kept** — especially whether the user's own account survives. A plan that silently drops the operator's own admin is the worst outcome here, and the uuid list hides it.
+
+### Export: seed a file from the server
+
+`frontier export <kind>` prints the live state in the same format. Reconciling an export plans zero changes, so it is the safe way to write a file for the first time.
+
+```bash
+~/frontier-test/frontier export platformuser \
+  --host "http://<SERVER>" \
+  -H "Authorization:Basic ${BASIC}"
+```
+
+- The kind argument is case-insensitive and takes a trailing `s`: `platformuser`, `PlatformUser`, and `platformusers` all work.
+- Output goes to stdout. To write a file, redirect: `> ~/frontier-test/platform-users.yaml`.
+- Before redirecting over a file that already exists, back it up: `cp <file> <file>.bak.$(date +%s)`, and tell the user.
+- Use this when the user has no desired-state file yet, or when a plan shows drift they did not expect and they want to start from what is actually there.
+
+### Adding a Superadmin
+
+When the user says **add superadmin &lt;email&gt;** or **make me superadmin**:
+
+1. Get the reconcile file (see [Getting the file path](#getting-the-file-path)). If there is none, export the current state into `~/frontier-test/platform-users.yaml` first, so the file starts as the truth and the new entry is the only change.
+2. Read the file. If a `PlatformUser` document already has that `ref` with `relation: admin`, say so and stop — nothing to do.
+3. Back up the file (`cp <file> <file>.bak.$(date +%s)`), then append the entry to the existing `PlatformUser` spec. Do not create a second `PlatformUser` document — one kind, one document.
+   ```yaml
+     - type: user
+       ref: <email>
+       relation: admin
+   ```
+4. Show the user the diff — just the added lines.
+5. Run the normal [reconcile flow](#the-reconcile-flow): dry run, show plan, ask, apply.
+6. After applying, the user still needs a fresh session. Drop any stored cookie for that email from `.cookies.json` and re-run [Automatic Login](#automatic-login-mailotp-flow) so the new grant is picked up.
+
+An email that does not exist in Frontier is **created** by the reconcile run. That is expected, not an error.
+
+### Safety rules for reconcile
+
+These sit on top of the general [Safety Rules](#safety-rules).
+
+- **Never apply without a dry run first**, and never without showing the plan. The CLI itself does not ask for confirmation — this skill is the only guard.
+- **Never edit the user's desired-state file without saying so.** Back it up, change the minimum, show the diff.
+- **Treat a `PlatformUser` file as the full access list.** Before applying a plan that removes admins, spell out exactly who loses access. Editing a file by hand and forgetting an existing admin is the easiest mistake to make here.
+- **Refuse to apply against a non-localhost server** without the explicit [Remote Host Protection](#remote-host-protection) confirmation. A reconcile can strip every admin from a shared environment in one call.
+- **`localhost` is not proof the target is local.** A port-forward or tunnel puts a shared server on a local port. Before an apply, confirm the port is the one Frontier was started on in [Step 8](#step-8-start-frontier-in-background) — the `server` value in `.config.json`, normally `8002`. If the port is anything else, treat it as remote and use [Remote Host Protection](#remote-host-protection), whatever the hostname says.
+- **The file and the `--host` are two separate decisions.** Only the host decides what gets written. Reading a shared server's desired-state file into your local sandbox is the normal way to test a change before it ships; pointing the command at that shared server is not. Say which server the plan targets every time you show a plan, so the direction is never in doubt.
+- **Never print the bootstrap client secret or the base64 Basic value.** Mask them everywhere, including in the command you echo back.
+- **Do not invent kinds or fields.** If the user asks for something outside the five kinds, say it is not managed by reconcile and point them at the ordinary RPCs. Reconcile does not manage organizations, projects, groups, users, or policies by design.
+
+---
+
 ## UI Testing
 
 Drive the two Frontier web apps through a real browser so UI engineers can exercise full user flows (button clicks, form fills, navigation, table assertions) without leaving the skill. Both apps live in the frontier monorepo, share a JS SDK, and talk to the same ConnectRPC backend the [RPC flow](#services) already targets.
@@ -1061,7 +1414,7 @@ Drive the two Frontier web apps through a real browser so UI engineers can exerc
 | App | Folder | Purpose | Who can sign in | `.env` keys |
 |-----|--------|---------|-----------------|-------------|
 | **client-demo** | `web/apps/client-demo` | End-user-facing demo app (sign-in, orgs, projects, settings) | Any logged-in user | `FRONTIER_CONNECT_ENDPOINT` |
-| **admin** | `web/apps/admin` | Platform admin UI | Super admins only (`+sa` users in `app.admin.users`) | `FRONTIER_API_URL` (port 8000 HTTP API) + `FRONTIER_CONNECTRPC_URL` (port 8002) |
+| **admin** | `web/apps/admin` | Platform admin UI | Platform admins only — users granted `relation: admin` via [reconcile](#gitops-reconcile) | `FRONTIER_API_URL` (port 8000 HTTP API) + `FRONTIER_CONNECTRPC_URL` (port 8002) |
 
 > Note: the admin app folder is **`admin`**, not `admin-app`. The package name in `package.json` is `admin`. Don't try to write to `apps/admin-app/` — it doesn't exist.
 
@@ -1303,7 +1656,7 @@ After each meaningful action, take a follow-up snapshot and tell the user **what
 Both apps use the mailotp flow that the [Automatic Login](#automatic-login-mailotp-flow) section already documents. In the UI:
 
 1. Use the configured `test_otp` and `test_domain` (`raystack.org`) from `.config.json` — same source of truth as the RPC flow.
-2. For **admin**, the email must be a super admin (`+sa` variant). If the user doesn't specify one, default to `admin1+sa@raystack.org`.
+2. For **admin**, the email must be a reconciled platform admin. If the user doesn't specify one, read `reconcile_file` from `.config.json` and use the first `PlatformUser` entry with `relation: admin`; fall back to `admin1+sa@raystack.org`. If that email isn't in the reconcile file, the sign-in will succeed but the admin pages will 403 — say so up front and offer [Adding a Superadmin](#adding-a-superadmin).
 3. For **client-demo**, any `raystack.org` email works; default to `user1@raystack.org` if unspecified.
 4. Drive the form, watching for these concrete button/page labels in the current Frontier UI:
    - The button reads **"Continue with Email"** (not "Send OTP"). Clicking it reveals an email textbox + a now-enabled "Continue with Email" button.

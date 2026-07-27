@@ -1,0 +1,21 @@
+# Desired-state file for platform users (superadmins and platform members).
+#
+# Apply it with:
+#   frontier reconcile -f <this file> --dry-run --host http://localhost:8002 -H "Authorization:Basic <base64>"
+#
+# Rules (RFC 0001):
+#   - This file is the FULL access list. A user you leave out loses platform access.
+#   - `type` is "user" (email or uuid) or "serviceuser" (uuid).
+#   - `relation` is "admin" or "member". A user who is both needs two entries.
+#   - An email that does not exist yet is created.
+#   - The bootstrap service account is server-managed. Do NOT list it here.
+
+apiVersion: v1
+kind: PlatformUser
+spec:
+  - type: user
+    ref: admin1+sa@raystack.org
+    relation: admin
+  - type: user
+    ref: admin2+sa@raystack.org
+    relation: admin

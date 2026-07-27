@@ -6,7 +6,7 @@ Claude Code plugins for Raystack services.
 
 ### frontier-sandbox
 
-A Claude Code skill to setup and test [Frontier](https://github.com/raystack/frontier) locally — both the **RPC layer** (ConnectRPC with auto-auth) and the **UI layer** (client-demo + admin web apps driven through a real browser).
+A Claude Code skill to setup and test [Frontier](https://github.com/raystack/frontier) locally — the **RPC layer** (ConnectRPC with auto-auth), the **UI layer** (client-demo + admin web apps driven through a real browser), and the **GitOps layer** (`frontier reconcile` against your local server).
 
 **Backend / RPC:**
 
@@ -14,7 +14,7 @@ A Claude Code skill to setup and test [Frontier](https://github.com/raystack/fro
 - **Choose Docker or local deps** — defaults to Docker (one PG container with both the `frontier` and `frontier_spicedb` databases + a SpiceDB container, via a provided compose file). Fall back to fully-local install if you prefer
 - **Auto-install dependencies** (local mode) — if PostgreSQL 15, SpiceDB v1.34.0, or Go 1.24+ aren't found, installs them locally without touching your global setup
 - **Test RPCs** — make ConnectRPC calls with automatic authentication via mail OTP flow
-- **Manage sessions** — cookie persistence, auto-login, super admin support
+- **Manage sessions** — cookie persistence, auto-login, platform admin support
 - **Rebuild & restart** — rebuild Frontier after code changes without recreating databases (skips rebuild if source unchanged)
 - **Seed data** — create sample orgs, users, and projects for testing
 - **View logs** — tail Frontier and SpiceDB logs for debugging
@@ -26,6 +26,18 @@ A Claude Code skill to setup and test [Frontier](https://github.com/raystack/fro
 - **Build and live-reload the Frontier JS SDK** — `pnpm install && pnpm run build` for the SDK, `pnpm run dev` for each app, with HMR for app source changes and a single `sdk rebuild` command for SDK changes
 - **Manage each app's `.env`** — read `FRONTIER_CONNECT_ENDPOINT`, repoint an app to another deployment (`point client-demo to <url>`) with backup and remote-host confirmation
 - **Real login flow** — drives the mailotp form just like a user, using the same `test_otp` and `+sa` conventions as the RPC flow
+
+**GitOps (new in 2.2):**
+
+Frontier now manages platform resources from a declarative file ([RFC 0001](https://github.com/raystack/frontier/blob/main/docs/rfcs/0001-declarative-reconcile.md)). The skill wraps that flow:
+
+- **Runs `frontier reconcile` against your local server** — five kinds: `PlatformUser`, `Permission`, `Role`, `Preference`, `Webhook`
+- **Asks once for your desired-state file** and remembers it in `.config.json`, so later runs don't ask again. Takes a single file, or a directory holding one file per kind — matched to kinds by their `kind:` field, then run in dependency order (permissions before roles)
+- **Renders consul-template files** — a `.ctmpl` with escaped `{{` markers is rendered into a scratchpad copy first, never edited in place. A file with real `{{ with secret }}` directives stops the run instead of being guessed at
+- **Always dry-runs first** — prints the plan verbatim, explains it in plain English, flags every removal, then asks before applying. Nothing is applied without a click
+- **`export <kind>`** — dumps the live server state as a desired-state file, so you can seed a file that plans zero changes
+- **`add superadmin <email>`** — backs up the file, appends the entry, dry-runs, applies, and clears the stale cookie
+- **Handles the auth change** — `app.admin.users` is gone from the server config. Superadmins now come from the boot-seeded bootstrap service account plus whatever the reconcile file grants. The `+sa` suffix is only a naming convention now
 
 ## Installation
 
@@ -69,6 +81,12 @@ Once running, these work at any point in the conversation:
 | `rebuild` / `restart` | Rebuild Frontier binary and restart the server |
 | `logs` / `debug` | Show recent Frontier or SpiceDB logs |
 | `seed` / `populate` | Create sample orgs, users, and projects |
+| `reconcile` / `gitops` | Dry-run the desired-state file, show the plan, ask before applying |
+| `dry run` / `plan` | Show the plan and stop |
+| `apply` | Apply the plan (still shows it first) |
+| `export <kind>` | Print live state as a desired-state file |
+| `add superadmin <email>` | Add a platform admin to the file and reconcile it |
+| `reconcile file` | Change the saved desired-state file path |
 | `status` | Show running processes, ports, and database info |
 | `teardown` / `stop` | Stop services and optionally drop databases |
 | `list rpcs` / `show rpcs` | List available RPCs with field details |
@@ -111,16 +129,32 @@ Once you've run the backend (or pointed at an existing one), drive the apps thro
 - The [`chrome-devtools-mcp`](https://github.com/ChromeDevTools/chrome-devtools-mcp) plugin — install with `/plugin install chrome-devtools-mcp` (or equivalent), restart Claude Code
 - The Frontier source cloned to `~/raystack/frontier` (the backend setup flow takes care of this)
 
+### GitOps
+
+Manage platform users, permissions, roles, preferences, and webhooks from a file:
+
+- "reconcile" — the skill asks for your file or directory the first time, then remembers it
+- "dry run" — show the plan without touching anything
+- "add superadmin me+sa@raystack.org"
+- "export platformuser" — write the current superadmins out as a file
+- "reconcile ~/work/iam/platform-users.yaml" — one-off file, with an option to save it as the default
+
+A `PlatformUser` file is the **full** access list. Anyone you leave out loses platform access. The skill spells out every removal in the plan before asking to apply.
+
+Two host checks it makes before any apply: `localhost` alone doesn't mean local (a port-forward puts a shared server on a local port), and the file you picked and the `--host` you're pointed at are separate decisions — only the host decides what gets written.
+
 ### Test Users
 
 | User | Type | Use for |
 |------|------|---------|
 | `user1@raystack.org` | Regular user | FrontierService RPCs |
-| `user1+sa@raystack.org` | Super admin | AdminService + FrontierService RPCs |
-| `admin1+sa@raystack.org` | Super admin (preconfigured) | Listed in config as platform admin |
-| `admin2+sa@raystack.org` | Super admin (preconfigured) | Listed in config as platform admin |
+| `user1+sa@raystack.org` | Regular user until reconciled | FrontierService RPCs; AdminService only after `add superadmin` |
+| `admin1+sa@raystack.org` | Platform admin (in the sample reconcile file) | AdminService + FrontierService RPCs |
+| bootstrap service account | Platform admin, seeded at boot | Basic auth for `reconcile` / `export`, and AdminService when no human admin exists |
 
-**Super admin** = platform-level admin (from config, has AdminService access). **Org admin** = user with admin role in a specific org (FrontierService only).
+**Platform admin** = has `relation: admin` in the `PlatformUser` reconcile file, or is the bootstrap service account. Has AdminService access. **Org admin** = user with an admin role in a specific org (FrontierService only).
+
+The server no longer promotes emails from `app.admin.users` — that key is gone. A `+sa` email is an ordinary user until a reconcile run grants it admin.
 
 ### Safety
 
@@ -133,6 +167,8 @@ The skill includes several safety measures:
 - **File permissions** — chmod 600 on files containing secrets
 - **Database name verification** — double-checks before dropping databases
 - **Health check timeout** — 30s timeout with log output on failure
+- **Never applies a reconcile blind** — dry run first, plan shown verbatim, removals called out, explicit click to apply
+- **Desired-state file backups** — any edit to your reconcile file is backed up first and the diff is shown
 
 ## Repository Structure
 
@@ -145,15 +181,17 @@ plugins/
       plugin.json                  # Plugin manifest
     config/
       sample.config.yaml           # Frontier config template (no secrets)
+      sample.platform-users.yaml   # Starter desired-state file for `frontier reconcile`
       docker-compose.yaml          # PostgreSQL + SpiceDB dependencies (default setup)
       init-db.sql                  # Creates the second DB (frontier_spicedb) on first PG boot
     skills/
       frontier-sandbox/
-        SKILL.md                   # Skill definition (RPC + UI flows)
+        SKILL.md                   # Skill definition (RPC + UI + GitOps flows)
 ```
 
 ## Versions
 
+- **2.2.0** — adds the GitOps layer from [RFC 0001](https://github.com/raystack/frontier/blob/main/docs/rfcs/0001-declarative-reconcile.md). New `reconcile` / `dry run` / `apply` / `export` / `add superadmin` commands that run against the local server, with a mandatory dry run and an explicit apply confirmation. The desired-state location is asked once and saved in `.config.json` — a single file, or a directory of per-kind files run in dependency order. Handles consul-template `.ctmpl` sources by rendering a scratchpad copy. Drops `app.admin.users` from the config template (the server no longer reads it) and replaces it with the `app.admin.bootstrap` service account, whose credentials are generated at setup and stored in `.config.json`. Cookie store and mailotp auto-login are unchanged.
 - **2.1.0** — switches every decision point to Claude Code's `AskUserQuestion` picker (radio buttons / multi-select with descriptions) instead of prose questions. Adds a top-level "User Interaction Style" section and concrete picker templates at 14 decision points: startup action, setup mode, port conflict, Docker prereqs fallback, health-check failure, teardown scope (Docker / UI / everything), remote-host confirmation, seed conflicts, app selection (`ui`), path-discovery folder ambiguity, `point <app> to <url>` confirmation, and Frontier role mapping.
 - **2.0.1** — corrections from a real end-to-end UI session: admin folder is `admin` not `admin-app`; admin uses two `.env` endpoint keys; documented chrome-devtools-mcp tool quirks (uid drift, sparse default snapshots, secret leakage via `wait_for`, dropdown-then-button click misroute, drill-into-detail for destructive actions); added Frontier role-name mapping (no "Admin" role — use "Organization Manager"); captured the real login route `/magiclink-verify`
 - **2.0.0** — adds UI testing for client-demo and admin via chrome-devtools-mcp, with SDK rebuild loop and `.env` endpoint management

@@ -9,6 +9,8 @@ app:
     port: 8002
   metrics_port: 9000
   identity_proxy_header: X-Frontier-Email
+  # Deprecated by RFC 0001 — custom permissions and roles now come from
+  # `frontier reconcile`. Kept only so older builds still boot.
   resources_config_path: file:///tmp/resources_config
   cors:
     allowed_origins:
@@ -49,9 +51,14 @@ app:
       domain: raystack.org
       otp: "<TEST_OTP>"
   admin:
-    users:
-      - "admin1+sa@raystack.org"
-      - "admin2+sa@raystack.org"
+    # `users:` is GONE. The server no longer promotes emails from config.
+    # Superadmins are managed declaratively — see "GitOps: reconcile" in the skill.
+    # The bootstrap service account below is the one account seeded at boot, so
+    # automation always has a superuser to log in as.
+    bootstrap:
+      client_id: "<BOOTSTRAP_CLIENT_ID>"       # must be a UUID
+      client_secret: "<BOOTSTRAP_CLIENT_SECRET>"
+      title: "GitOps Bootstrap Superuser"
   mailer:
     smtp_host: smtp.example.com
     smtp_port: 587

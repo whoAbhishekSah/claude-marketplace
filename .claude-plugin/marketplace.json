@@ -11,8 +11,8 @@
     {
       "name": "frontier-sandbox",
       "source": "./plugins/frontier-sandbox",
-      "description": "Setup and test Frontier locally — ConnectRPC calls with auto-auth, plus UI testing of client-demo and admin-app via chrome-devtools-mcp (button clicks, form fills, live SDK rebuilds)",
-      "version": "2.1.0",
+      "description": "Setup and test Frontier locally — ConnectRPC calls with auto-auth, UI testing of client-demo and admin via chrome-devtools-mcp, and GitOps reconcile (platform users, permissions, roles, preferences, webhooks) with a mandatory dry run",
+      "version": "2.2.0",
       "author": {
         "name": "Abhishek Sah"
       }
